@@ -1,0 +1,2222 @@
+---
+title: "Semantic illusions, fast and slow - Data analysis"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+Note that the experiment referred to as study 4 in the code is actually referred to as Experiment 3 in the paper, because of the additional comparison two-response experiment that was conducted between experiment 2 and experiment 3. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
+```
+
+```{r libraries, message=FALSE, warning=FALSE}
+#load the required libraries
+library(tidyverse)
+library(ez)
+library(multcomp)
+library(pastecs)
+library(lme4)
+library(ggeffects)
+library(afex)
+library(emmeans)
+library(viridis)
+library(psych)
+library(car)
+library(WRS2)
+library(glmmTMB)
+library(jtools)
+library(ggpubr)
+library(lmerTest)
+library(cowplot)
+library(pbkrtest)
+library(ggridges)
+library(broom.mixed)
+library(betareg)
+library(lmtest)
+library(sandwich)
+library(buildmer)
+library(parallelly)
+library(parameters)
+library(effectsize)
+```
+
+```{r functions}
+# load functions
+
+# SE - compute standard errors
+std_mean <- function(x) sd(x, na.rm = TRUE)/sqrt(length(x[!is.na(x)]))
+
+# mean SD - return mean of a variable with sd in brackets
+mean_sd_function <- function(var, nb_decimals=0) {
+  mean_var =  round(mean(var, na.rm = TRUE), nb_decimals)
+  sd_var = round(sd(var, na.rm = TRUE), nb_decimals)
+  mean_sd = paste(mean_var, " (", sd_var, ")", sep="")
+  return(mean_sd)
+}
+
+# function to obtain the percentage of a given response for a given variable
+percent_function <- function(response, var) {
+  percent = sum(var == response) / length(var) * 100
+  return(percent)
+}
+
+# effect size for Wilcoxon test
+rFromWilcox<-function(wilcoxModel, N){
+z<- qnorm(wilcoxModel$p.value/2)
+r<- z/ sqrt(N)
+cat(wilcoxModel$data.name, "Effect Size, r = ", r)
+}
+
+# save load function
+save_load <- function(object, mode) {
+  data_folder <- "./Saved_models/"  # Specify the data folder path relative to your working directory
+  
+  if (mode == "save") {
+    # Save the object as an .rds file with the object name in the specified folder
+    file_name <- paste0(data_folder, deparse(substitute(object)), ".rds")
+    saveRDS(object, file_name)
+    cat("Object saved as", file_name, "\n")
+  } else if (mode == "load") {
+    # Load the object from the .rds file with the object name in the specified folder
+    file_name <- paste0(data_folder, deparse(substitute(object)), ".rds")
+    if (file.exists(file_name)) {
+      object <- readRDS(file_name)
+      cat("Object loaded from", file_name, "\n")
+      return(object)
+    } else {
+      cat("Error: File", file_name, "does not exist.\n")
+    }
+  } else {
+    cat("Error: Mode must be 'save' or 'load'.\n")
+  }
+}
+```
+
+```{r load df}
+# load the data from the 3 studies and the pre-test
+data <- read.csv("./tidy_data_S1_S2_S3.csv")
+
+# we change some variables types to factor
+data <- data %>% mutate(across(c(study, impostor, subject, gender, education, item_number, load_acc, slow, to_exclude, response_stage, resp_cat))) %>% 
+         mutate(conflict = factor(conflict, levels = c("C", "NC"))) %>% 
+  # we create a new confidence variable bounded between 0 and 1
+  mutate(betaconf = ((conf/100)*(1-0.01) + 0.01/2))
+
+# we compute the direction of change
+data$direction = NA
+
+for (row in seq(1, nrow(data), by=2)){
+  if(data$accuracy[row] == 1 & data$accuracy[row+1] == 1){
+    data[row, "direction"] = "11"
+    data[row+1, "direction"] = "11"
+  } else if(data$accuracy[row] == 0 & data$accuracy[row+1] == 1){
+    data[row, "direction"] = "01"
+    data[row+1, "direction"] = "01"
+  } else if(data$accuracy[row] == 1 & data$accuracy[row+1] == 0){
+    data[row, "direction"] = "10"
+    data[row+1, "direction"] = "10"
+  } else if(data$accuracy[row] == 0 & data$accuracy[row+1] == 0){
+    data[row, "direction"] = "00"
+    data[row+1, "direction"] = "00"
+  }
+}
+
+#NA for one response pre-test
+data$direction[data$study == "one_resp_pre_test"] <- NA
+data$direction <- as.factor(data$direction)
+
+# get number of cores for parallel computations
+ncores = availableCores()
+```
+
+## Trial exclusion in the 3 studies
+
+```{r excluded trials percent}
+# compute percent of missed deadlines or loads by subject + raw nb of trials (/2000)
+percent_missed_tot <- data %>% filter(response_stage == "a" & study != "one_resp_pre_test") %>%
+  group_by(study) %>% 
+  # exclude missed dealines or missed loads
+  summarise(percent_missed_tot = sum(slow == 1 |load_acc == 0)/length(slow)*100,
+            raw_nb_tot = sum(slow == 1 |load_acc == 0),
+            percent_missed_load = sum(load_acc == 0)/length(slow)*100,
+            percent_missed_deadline = sum(slow == 1)/length(slow)*100) %>% 
+ mutate(across(where(is.numeric), \(x) round(x, 1)))
+```
+
+```{r excluded conflict}
+# compute percent of missed deadlines or loads by subject + raw nb of trials (/2000) as a function of conflict
+percent_missed_tot_C <- data %>% filter(response_stage == "a" & study != "one_resp_pre_test") %>%
+  group_by(study, conflict) %>% 
+  # exclude missed dealines or missed loads
+  summarise(percent_missed_tot = sum(slow == 1 |load_acc == 0)/length(slow)*100,
+            raw_nb_tot = sum(slow == 1 |load_acc == 0),
+            percent_missed_load = sum(load_acc == 0)/length(slow)*100,
+            percent_missed_deadline = sum(slow == 1)/length(slow)*100) %>% 
+ mutate(across(where(is.numeric), round, 1))
+```
+
+### Trial exclusion code(s)
+
+Here comment / uncomment the lines given the analyses you want to perform.
+
+```{r exlusion failed loads or deadlines}
+# we exclude trials with failed loads or deadlines (as in the paper)
+data <- data %>% filter(to_exclude == 0 | is.na(to_exclude))
+
+# here you can comment the lines above to:
+# 1) exclude "Don't know" results
+# if you want to check the robustness of the confidence results
+
+# data = data %>% filter(to_exclude == 0 | is.na(to_exclude)) %>% 
+#   filter(resp_cat != 4)
+
+# 2) recode excluded trials as 0 (missed deadline) and keep the responses for
+# missed loads (as responses were recorded for those trials) to see whether
+# response exclusion drive the results
+
+# data = data %>% 
+#   mutate(accuracy = if_else(slow == 1, 0, accuracy))
+```
+
+
+## Study 1
+
+### Comparison with one-response pre-test
+
+#### Time pressure
+
+Study = dummy coding.
+
+```{r RT s1 vs one-response pre-test}
+temp = data %>% filter((study == 1 & response_stage == "a") | study == "one_resp_pre_test") %>%
+  filter(conflict == "C" & accuracy == 1) %>% 
+  mutate(study = factor(study, levels = c("one_resp_pre_test", 1)),
+         log_rt = log(RT))
+
+# simple lm model
+model_rt_s1_oneresp = lm(log(RT) ~ study, data = temp)
+
+# # max random structure
+formula = log_rt ~ study + (1|subject) + (study|item_number)
+
+# finding optimal random structure
+model = buildmer(formula, data = temp, buildmerControl=buildmerControl(include = "study", args=list(control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))))
+
+# looking at the formula
+final_formula = formula(model@model); final_formula
+
+# we build the model with the final formula
+model_rt_s1_oneresp_1 = lmer(formula = log(RT) ~ 1 + study + (1 | subject) + (1 | item_number),  data = temp, control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))
+save_load(model_rt_s1_oneresp_1, "save")
+
+# we load the model
+model_rt_s1_oneresp_1 = save_load(model_rt_s1_oneresp_1, "load")
+
+# we check that mixed model better than linear model
+AIC(model_rt_s1_oneresp, model_rt_s1_oneresp_1)
+
+summ(model_rt_s1_oneresp_1, t.df="k-r", exp=TRUE)
+model_parameters(model_rt_s1_oneresp_1, effects = "random")
+
+# estimated means from the model
+emm = emmeans(model_rt_s1_oneresp_1, ~ study, type = "response", lmer.df="kenward-roger"); emm
+
+# eff size
+eff_size(emm, df.residual(model_rt_s1_oneresp_1), sigma = sigma(model_rt_s1_oneresp_1))
+```
+
+#### Consistency confound
+
+Study = dummy coded
+
+```{r consistency confound S1}
+# we select final stage S1 and one-response pretest
+temp = data %>% filter(study == 1 | study == "one_resp_pre_test") %>%
+  filter(response_stage != "a" | is.na(response_stage)) %>% 
+  mutate(study = factor(study, levels = c("one_resp_pre_test", 1)))
+
+# simple glm model
+model_accu_s1_oneresp = glm(accuracy ~ study, family = "binomial", data = temp)
+
+# max random structure
+formula = accuracy ~ study + (1|subject) + (study|item_number)
+
+#we find the best random structure
+model = buildmer(formula, data = temp, family = "binomial", buildmerControl=buildmerControl(include = "study", args=list(control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))))
+
+final_formula = formula(model@model); final_formula
+
+# we run the model with the final formula
+model_accu_s1_oneresp_1 = glmer(formula = final_formula, family = "binomial", data = temp, control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))
+save_load(model_accu_s1_oneresp_1, "save")
+
+# we load it
+model_accu_s1_oneresp_1 = save_load(model_accu_s1_oneresp_1, "load")
+
+# we check that better fit than simple glm model
+AIC(model_accu_s1_oneresp, model_accu_s1_oneresp_1)
+
+# we use parametric bootstrapping to estimate the FE
+model_accu_s1_oneresp_boot = bootstrap_model(
+  model_accu_s1_oneresp_1,
+  iterations = 1000,
+  type = "parametric",
+  parallel = "multicore",
+  n_cpus = ncores,
+  cluster = NULL,
+  verbose =TRUE
+)
+
+save_load(model_accu_s1_oneresp_boot, "save")
+
+model_accu_s1_oneresp_boot = save_load(model_accu_s1_oneresp_boot, "load")
+
+# get parameters and effect sizes
+b = bootstrap_parameters(model_accu_s1_oneresp_boot) %>% 
+  mutate(d = logoddsratio_to_d(Coefficient),
+         d_low = logoddsratio_to_d(CI_low),
+         d_high = logoddsratio_to_d(CI_high),
+    Coefficient = exp(Coefficient), CI_low = exp(CI_low), CI_high = exp(CI_high)); b
+
+model_parameters(model_accu_s1_oneresp_1, effects="random")
+
+# estimated means
+emm = emmeans::emmeans(model_accu_s1_oneresp_boot, ~study, type = "response"); print(model_parameters(emm))
+```
+
+### Accuracy as a function of conflict and response stage
+
+Conflict and response stage : sum coding
+
+```{r accuracy as a function of conflict and response stage S1}
+temp = data %>% filter(study == 1) %>%
+  mutate(response_stage = factor(response_stage, levels = c("b", "a")),
+         conflict = factor(conflict, levels = c("C", "NC")))
+
+# we set sum coding
+contrasts(temp$conflict) = contr.sum(levels(temp$conflict))
+contrasts(temp$response_stage) = contr.sum(levels(temp$response_stage))
+
+# simple glm model
+model_accu_S1 = glm(accuracy ~ conflict*response_stage, family = "binomial", data = temp)
+
+# max random structure
+formula = accuracy ~ conflict*response_stage + (conflict*response_stage|subject) + (conflict*response_stage|item_number)
+
+# we find the best random structure
+model = buildmer(formula, data = temp, family = "binomial", buildmerControl=buildmerControl(include = "conflict*response_stage", args=list(control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))))
+
+final_formula = formula(model@model); final_formula
+
+# we run the model with the final formula
+model_accu_S1_1 = mixed(formula = final_formula, family = "binomial", data = temp, control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)), expand_re = TRUE, method = "PB", args_test = list(nsim = 1000, seed = 123, cl = ncores))
+save_load(model_accu_S1_1, "save")
+
+# we load it
+model_accu_S1_1 = save_load(model_accu_S1_1, "load")
+
+# we check that better fit than simple glm model
+AIC(model_accu_S1, model_accu_S1_1$full_model)
+
+# get the FE and random effects
+nice(model_accu_S1_1)
+model_parameters(model_accu_S1_1$full_model, effects="random")
+
+# estimated means
+emm = emmeans::emmeans(model_accu_S1_1, ~conflict*response_stage, type = "response"); emm
+
+model_parameters(model_accu_S1_1$full_model, effects="fixed") %>% 
+  mutate(d = logoddsratio_to_d(Coefficient)) %>% 
+  dplyr::select(Parameter, d)
+```
+
+```{r save model power analysis n100}
+# here we save the df and the model used for the previous analysis to use
+# them for our sensitivity power analysis
+model_accu_S1_pwr= glmer(formula = accuracy ~ 1 + conflict*response_stage + 
+  (1 + conflict | subject) + (1 + conflict | item_number), family ="binomial", data = temp, control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))
+
+temp_S1_pwr = temp
+save_load(temp_S1_pwr, "save")
+save_load(model_accu_S1_pwr, "save")
+```
+
+We investigate the type of errors made by the subjects in the anomaly condition.
+
+```{r type of errors S1}
+# percent incorrect responses in response stages in anomaly trials
+temp = data %>% filter(study == 1) %>% 
+  filter(conflict == "C") %>% 
+  group_by(subject, response_stage) %>% 
+  summarise(percent_incorrect = percent_function(0, accuracy)) %>% 
+  group_by(response_stage) %>% 
+  summarise(percent_incorrect = mean(percent_incorrect)); temp
+
+# type of errors made in incorrect responses in anomaly trials
+temp = data %>% filter(study == 1) %>% 
+  filter(accuracy == 0 & conflict == "C") %>% group_by(response_stage, subject) %>% 
+  summarise(percent_true = percent_function(1, resp_cat),
+            percent_filler = percent_function(2, resp_cat),
+            percent_DK = percent_function(4, resp_cat)) %>%
+              ungroup() %>% 
+  group_by(response_stage) %>%
+  summarise(percent_undistorted = mean(percent_true),
+            percent_filler = mean(percent_filler),
+            percent_DK = mean(percent_DK))
+
+knitr::kable(temp, digits=1)
+```
+
+### Direction of change
+
+```{r direction of change S1}
+# we compute the proportion of directions of change for each subject
+data_direction_1 <- data %>% filter(study == 1 & response_stage == "a") %>%
+  dplyr::select(subject, conflict, direction) %>% 
+  group_by(subject, conflict, direction) %>%
+  mutate(count_per_dir = n()) %>% ungroup() %>% distinct() %>% group_by(conflict) %>% 
+  complete(subject, direction, fill = list(count_per_dir = 0)) %>% 
+  ungroup() %>%
+  group_by(subject, conflict) %>%
+  mutate(proportion = 100 * count_per_dir / sum(count_per_dir))  %>% 
+  ungroup()
+
+# descriptive stats as a function of conflict
+data_direction_desc <- data_direction_1 %>% 
+  group_by(conflict, direction) %>%
+  summarise(mean_sd = mean_sd_function(proportion, 1)) %>%
+  arrange(desc(conflict))
+
+knitr::kable(data_direction_desc)
+
+# we compute the individual non-correction rate for each participant
+# n = 79 / 100
+non_corr_rate_S1 <- data_direction_1 %>% filter(conflict == "C") %>% 
+  filter(direction == "11" | direction == "01") %>% dplyr::select(-count_per_dir) %>% 
+  pivot_wider(names_from = direction, values_from = proportion) %>% 
+  rename(one_one = "11",
+         zero_one = "01") %>% 
+  mutate(non_corr_rate = case_when(
+    one_one == 0 & zero_one == 0 ~ 999,
+         one_one == 0 ~ 0,
+         zero_one == 0 ~ 100,
+         TRUE ~ (one_one / (one_one + zero_one))*100)) %>%
+  filter(non_corr_rate != 999)
+
+# mean non-correction rate
+mean_sd_function(non_corr_rate_S1$non_corr_rate, 1)
+```
+
+### Conflict detection (confidence)
+
+#### No-conflict correct vs Conflict incorrect (classic measure)
+
+```{r conflict detection classical S1}
+# confidence as a function of conflict and accuracy
+temp = data %>% filter(study == 1) %>% 
+  filter(response_stage == "a") %>% 
+  group_by(subject, conflict, accuracy) %>%
+  summarise(mean_conf = mean(conf, na.rm=TRUE)) %>% ungroup() %>%
+  group_by(conflict, accuracy) %>%
+  summarise(mean_conf = mean_sd_function(mean_conf, 1))
+
+knitr::kable(temp)
+
+# we look only at the initial response stage
+data_1_CD <- data %>% filter(study == 1) %>% filter(response_stage == "a") %>%
+  mutate(biased = case_when(
+  conflict == "NC" & accuracy == 1 ~ "0",
+  conflict == "C" & accuracy == 0 ~ "1",
+  TRUE ~ "NA")) %>% filter(biased != "NA") %>%
+    group_by(subject, biased) %>% 
+  summarise(mean_conf = mean(conf, na.rm=TRUE)) %>% ungroup() %>% 
+  mutate(biased = factor(biased, levels = c("1", "0")))
+
+
+# desc stats
+data_1_CD %>% group_by(biased) %>% summarise(mean_sd_function(mean_conf, 1))
+```
+
+Biased = dummy coding
+
+```{r conflict detection S1 model}
+temp = data %>%
+  filter(study == 1 & response_stage == "a") %>% 
+  filter((conflict == "NC" & accuracy == 1) | (conflict == "C" & accuracy == 0)) %>% 
+  mutate(biased = if_else(conflict == "C", 1, 0))
+
+# simple beta regression model
+CD_S1_beta_model = betareg(betaconf ~ biased, data = temp)
+
+# max random structure
+formula = betaconf ~ biased + (biased|subject) + (biased|item_number)
+
+# we find the best random structure  
+model = buildglmmTMB(formula, data = temp, family = beta_family(), buildmerControl=buildmerControl(include = "biased"))
+
+final_formula = formula(model@model); final_formula
+
+# we build the model with the final formula
+CD_S1_beta_model_1 = glmmTMB(formula = final_formula, ziformula= ~0, family = beta_family(), data=temp)
+# diagnose(CD_S1_beta_model_1)
+save_load(CD_S1_beta_model_1, "save")
+
+CD_S1_beta_model_1 = save_load(CD_S1_beta_model_1, "load")
+
+# we check that better fit to the data than simple model
+AIC(CD_S1_beta_model, CD_S1_beta_model_1)
+
+# here we put more iterations than 1000 because some model fail to converge 
+# in some cases
+CD_S1_beta_model_boot = bootstrap_model(
+  CD_S1_beta_model_1,
+  iterations = 1750,
+  type = "parametric",
+  parallel = "multicore",
+  n_cpus = ncores,
+  cluster = NULL,
+  verbose =TRUE
+)
+save_load(CD_S1_beta_model_boot, "save")
+
+CD_S1_beta_model_boot = save_load(CD_S1_beta_model_boot, "load")
+
+# get FE and random effects
+b = bootstrap_parameters(CD_S1_beta_model_boot) %>% 
+  mutate(d = logoddsratio_to_d(Coefficient),
+         d_low = logoddsratio_to_d(CI_low),
+         d_high = logoddsratio_to_d(CI_high),
+         Coefficient = exp(Coefficient), CI_low = exp(CI_low), CI_high = exp(CI_high)); b
+model_parameters(CD_S1_beta_model_1, effects="random")
+
+# estimated means
+emm = emmeans::emmeans(CD_S1_beta_model_boot, ~ biased, type = "response"); print(model_parameters(emm), digits=3)
+```
+
+
+```{r power analysis save conf S1}
+# here we save df and model for our sensivity power analysis
+temp_conf_S1_conf = temp
+save_load(temp_conf_S1_conf, "save")
+save_load(CD_S1_beta_model_1, "save")
+```
+
+
+#### No-conflict correct vs Conflict correct
+
+```{r conflict detection no-conflict correct vs conflict correct S1}
+# we look only at the initial response stage
+data_1_CD_correct <- data %>% filter(study == 1 & response_stage == "a") %>%
+  mutate(correct_conf = case_when(
+  conflict == "NC" & accuracy == 1 ~ "0",
+  conflict == "C" & accuracy == 1 ~ "1",
+  TRUE ~ "NA")) %>% filter(correct_conf != "NA") %>%
+    group_by(subject, correct_conf) %>% 
+  summarise(mean_conf = mean(conf)) %>% ungroup() %>% 
+  mutate(correct_conf = factor(correct_conf, levels = c("1", "0")))
+
+# desc stats
+data_1_CD_correct %>% group_by(correct_conf) %>% summarise(mean_sd_function(mean_conf, 1))
+```
+
+Biased = dummy coding.
+
+```{r conflict correct conf S1}
+temp = data %>%
+  filter(study == 1 & response_stage == "a") %>% 
+  filter((conflict == "NC" & accuracy == 1) | (conflict == "C" & accuracy == 1)) %>% 
+  mutate(correct_conf = if_else(conflict == "C", 1, 0))
+
+# simple beta regression model
+corr_C_S1_beta_model = betareg(betaconf ~ correct_conf, data = temp)
+
+# max random structure
+formula = betaconf ~ correct_conf + (correct_conf|subject) + (correct_conf|item_number)
+
+# we find the best random structure  
+model = buildglmmTMB(formula, data = temp, family = beta_family(), buildmerControl=buildmerControl(include = "correct_conf"))
+
+final_formula = formula(model@model); final_formula
+
+# random structure unsupported or does not improve fit
+# we use robust SE instead
+coeftest(corr_C_S1_beta_model, vcov = vcovCL, cluster = ~ subject + item_number, type = "HC0")
+
+# get estimated means
+emm = emmeans(corr_C_S1_beta_model, ~correct_conf, type = "response", vcov = sandwich::vcovCL(corr_C_S1_beta_model, cluster = ~subject + item_number)); emm
+
+# eff size
+estimate <- 0.121895
+std_error <- 0.069357
+
+# Calculating the 95% confidence interval
+lower_bound <- estimate - (1.96 * std_error)
+upper_bound <- estimate + (1.96 * std_error)
+
+# Display the confidence interval
+c(lower_bound, upper_bound)
+
+# convert to cohen's d
+d = logoddsratio_to_d(estimate)
+d_low = logoddsratio_to_d(lower_bound)
+d_high = logoddsratio_to_d(upper_bound)
+
+d; d_low; d_high
+```
+
+### Illusion strength
+
+Group = dummy coded.
+
+```{r illusion strength study 1}
+# we compute the mean illusion strength for each item
+# initial no-conflict accuracy minus initial conflict accuracy
+illusion_strength <- data %>% filter(study == 1 & response_stage == "a") %>%
+  group_by(item_number, conflict) %>% 
+  summarise(mean_accu = mean(accuracy)*100) %>% 
+  pivot_wider(names_from = "conflict", values_from = "mean_accu") %>% 
+  mutate(illusion_strength = NC - C) %>% 
+  dplyr::select(item_number, illusion_strength)
+
+# compute mean and sd of illusion strength
+mean_illu = mean(illusion_strength$illusion_strength)
+sd_illu = sd(illusion_strength$illusion_strength)
+
+# we standardize the illusion strength
+illusion_strength <- illusion_strength %>%
+  mutate(illusion_strength = (illusion_strength - mean_illu) / sd_illu)
+
+# we join the tables; select the initial stage data
+# we create a variable named group: 0 for no-conflict correct (baseline),
+# 1 for conflict correct and 2 for conflict incorrect
+temp <- data %>% filter(study == 1 & response_stage == "a") %>% 
+  left_join(illusion_strength) %>% mutate(accuracy = as.factor(accuracy)) %>% 
+  mutate(group = as.factor(case_when(conflict== "NC" & accuracy == 1 ~ 0,
+                       conflict == "C" & accuracy == 1 ~ 1,
+                       conflict == "C" & accuracy == 0 ~ 2,
+                       TRUE ~ 3))) %>% filter(group != 3)
+
+# simple beta regression model
+model_illu_S1 = betareg(betaconf ~ group * illusion_strength, data = temp)
+
+# max random structure
+formula = betaconf ~ group * illusion_strength + (group*illusion_strength|subject)
+
+# we find the best random structure  
+model = buildglmmTMB(formula, data = temp, family = beta_family(), buildmerControl=buildmerControl(include = "group * illusion_strength"))
+
+# get the final formula
+final_formula = formula(model@model); final_formula
+# random structure unsupported or does not improve fit
+
+# we use our first betareg model with robust standard errors
+# and clusters per subject and items
+model_illu_S1_robust = coeftest(model_illu_S1, 
+          vcov = vcovCL,
+        type = "HC0",
+        cluster = ~subject); tidy_df = tidy(model_illu_S1_robust); tidy_df
+
+# effect size
+tidy_df = tidy_df %>% mutate(d = round(logoddsratio_to_d(estimate), 2),
+                             d_low = round(logoddsratio_to_d(estimate - (1.96 * std.error)), 2),
+                             d_high = round(logoddsratio_to_d(estimate + (1.96 * std.error)), 2)) %>%
+  dplyr::select(term, estimate, std.error, d, d_low, d_high);
+
+tidy_df
+```
+
+## Study 2
+
+### Time pressure (comparison with study 1)
+
+Study = dummy coded.
+
+```{r time pressure S1 vs S2}
+# here we get initial response stage S1 vs S2
+temp = data %>% filter(study == 1 | study == 2) %>% 
+  filter(response_stage == "a") %>%
+  mutate(study = factor(study, levels = c(1, 2)),
+         log_rt = log(RT))
+
+# simple log linear regression model
+model_rt_S1_S2 = lm(log(RT) ~ study, data = temp)
+
+# max random structure
+formula = log_rt ~ study + (1|subject) + (study|item_number)
+
+# finding optimal random structure
+model = buildmer(formula, data = temp, buildmerControl=buildmerControl(include = "study", args=list(control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))))
+
+# looking at the formula
+final_formula = formula(model@model); final_formula
+
+# we build the model with the final formula
+model_rt_S1_S2_1 = lmer(formula = log(RT) ~ 1 + study + (1 | subject) + (1 | item_number),  data = temp, control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))
+save_load(model_rt_S1_S2_1, "save")
+
+# we load the model
+model_rt_S1_S2_1 = save_load(model_rt_S1_S2_1, "load")
+
+# better fit to data than simple lm model
+AIC(model_rt_S1_S2, model_rt_S1_S2_1)
+
+summ_RT_S1_S2 = summ(model_rt_S1_S2_1, t.df="k-r", exp=TRUE)
+save_load(summ_RT_S1_S2, "save")
+
+# get FE and random effects
+summ_RT_S1_S2 = save_load(summ_RT_S1_S2, "load"); summ_RT_S1_S2
+model_parameters(model_rt_S1_S2_1, effects = "random")
+
+# get estimated means from the model
+emm_options(lmer.df = "Kenward-Roger")
+emm_RT_S1_S2 = emmeans(model_rt_S1_S2_1, ~ study, type = "response", pbkrtest.limit = 3005)
+save_load(emm_RT_S1_S2, "save")
+emm_RT_S1_S2 = save_load(emm_RT_S1_S2, "load"); emm_RT_S1_S2
+
+# eff size
+eff_size(emm_RT_S1_S2, df.residual(model_rt_S1_S2_1), sigma = sigma(model_rt_S1_S2_1))
+```
+
+### Accuracy as a function of conflict and response stage
+
+Conflict and response stage = sum coding.
+
+```{r accuracy as a function of conflict and response stage S2}
+temp = data %>% filter(study == 2) %>% 
+  mutate(response_stage = factor(response_stage, levels = c("b", "a")),
+         conflict = factor(conflict, levels = c("C", "NC")))
+
+# we set sum coding
+contrasts(temp$conflict) = contr.sum(levels(temp$conflict))
+contrasts(temp$response_stage) = contr.sum(levels(temp$response_stage))
+
+# simple glm model
+model_accu_S2 = glm(accuracy ~ conflict*response_stage, family = "binomial", data = temp)
+
+# max random structure
+formula = accuracy ~ conflict*response_stage + (conflict*response_stage|subject) + (conflict*response_stage|item_number)
+
+# we find the best random structure  
+model = buildmer(formula, data = temp, family = "binomial", buildmerControl=buildmerControl(include = "conflict*response_stage", args=list(control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))))
+ 
+final_formula = formula(model@model); final_formula
+
+# we run the model with the final formula
+model_accu_S2_1 = mixed(formula = accuracy ~ 1 + conflict + response_stage + conflict:response_stage + 
+     (1 + conflict | subject) + (1 + conflict || item_number), 
+     family = "binomial", data = temp, control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)), expand_re = TRUE, method = "PB", progress=TRUE, args_test = list(nsim = 1000, seed = 123, cl = ncores))
+save_load(model_accu_S2_1, "save")
+
+# we load it
+model_accu_S2_1 = save_load(model_accu_S2_1, "load")
+
+# we check that better fit than simple glm model
+AIC(model_accu_S2, model_accu_S2_1$full_model)
+
+# get fixed effects and random effects
+nice(model_accu_S2_1)
+model_parameters(model_accu_S2_1$full_model, effects="random")
+
+model_parameters(model_accu_S2_1$full_model, effects="fixed") %>% 
+  mutate(d = logoddsratio_to_d(Coefficient)) %>% 
+  dplyr::select(Parameter, d)
+```
+
+### Initial accuracy on anomaly trials S1 vs S2
+
+Study = dummy coding
+
+```{r S1 vs S2 initial accuracy conflict}
+# filter for conflict and initial response stage S1 S2
+temp = data %>% filter(study == 1 | study == 2) %>% 
+  filter(conflict == "C" & response_stage == "a") %>% 
+  mutate(study = factor(study, levels=c(1, 2)))
+
+# simple glm
+model_conflict_S1_S2 = glm(accuracy ~ study, family = "binomial", data = temp)
+
+# max random structure
+formula = accuracy ~ study + (1|subject) + (study|item_number)
+
+# we find the best random structure  
+model = buildmer(formula, data = temp, family = "binomial", buildmerControl=buildmerControl(include = "study", args=list(control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))))
+
+final_formula = formula(model@model); final_formula
+
+# we run the model with the final formula
+model_conflict_S1_S2_1 = glmer(formula = final_formula, family = "binomial", data = temp, control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))
+save_load(model_conflict_S1_S2_1, "save")
+
+model_conflict_S1_S2_1 = save_load(model_conflict_S1_S2_1, "load")
+
+# we check that mixed model better than linear model
+AIC(model_conflict_S1_S2, model_conflict_S1_S2_1)
+
+model_conflict_S1_S2_boot = bootstrap_model(
+  model_conflict_S1_S2_1,
+  iterations = 1000,
+  type = "parametric",
+  parallel = "multicore",
+  n_cpus = ncores,
+  cluster = NULL,
+  verbose =TRUE
+)
+
+save_load(model_conflict_S1_S2_boot, "save")
+
+model_conflict_S1_S2_boot = save_load(model_conflict_S1_S2_boot, "load")
+
+
+# get FE and random effects
+b = bootstrap_parameters(model_conflict_S1_S2_boot) %>% 
+  mutate(d = logoddsratio_to_d(Coefficient),
+         d_low = logoddsratio_to_d(CI_low),
+         d_high = logoddsratio_to_d(CI_high),
+         Coefficient = exp(Coefficient), CI_low = exp(CI_low), CI_high = exp(CI_high)); b
+model_parameters(model_conflict_S1_S2_1, effects="random")
+
+# estimated means
+emm = emmeans::emmeans(model_conflict_S1_S2_boot, ~study, type = "response"); print(model_parameters(emm))
+```
+
+We investigate the type of errors made by the subjects in the anomaly condition.
+
+```{r type of errors S2}
+# get type of erros for incorrect anomaly responses
+temp = data %>% filter(study == 2) %>%  
+  filter(accuracy == 0 & conflict == "C") %>% group_by(response_stage, subject) %>% 
+  summarise(percent_true = percent_function(1, resp_cat),
+            percent_filler = percent_function(2, resp_cat),
+            percent_DK = percent_function(4, resp_cat)) %>%
+              ungroup() %>% 
+  group_by(response_stage) %>%
+  summarise(percent_undistorted = mean(percent_true),
+            percent_filler = mean(percent_filler),
+            percent_DK = mean(percent_DK))
+
+knitr::kable(temp, digits=1)
+```
+
+### Direction of change
+
+#### S2
+
+```{r direction of change S2}
+# we compute the proportion of directions of change for each subject
+data_direction_2 <- data %>% filter(study == 2 & response_stage == "a") %>%
+  dplyr::select(subject, conflict, direction) %>% 
+  group_by(subject, conflict, direction) %>%
+  mutate(count_per_dir = n()) %>% ungroup() %>% distinct() %>% group_by(conflict) %>% 
+  complete(subject, direction, fill = list(count_per_dir = 0)) %>% 
+  ungroup() %>%
+  group_by(subject, conflict) %>%
+  mutate(proportion = 100 * count_per_dir / sum(count_per_dir))  %>% 
+  ungroup()
+
+# descriptive stats as a function of conflict
+data_direction_desc <- data_direction_2 %>% 
+  group_by(conflict, direction) %>%
+  summarise(mean_sd = mean_sd_function(proportion, 1)) %>%
+  arrange(desc(conflict))
+
+knitr::kable(data_direction_desc)
+
+# we compute the individual non-correction rate for each participant
+# n = 75 / 100
+non_corr_rate_S2 <- data_direction_2 %>% filter(conflict == "C") %>% 
+  filter(direction == "11" | direction == "01") %>% dplyr::select(-count_per_dir) %>% 
+  pivot_wider(names_from = direction, values_from = proportion) %>% 
+  rename(one_one = "11",
+         zero_one = "01") %>% 
+  mutate(non_corr_rate = case_when(
+    one_one == 0 & zero_one == 0 ~ 999,
+         one_one == 0 ~ 0,
+         zero_one == 0 ~ 100,
+         TRUE ~ (one_one / (one_one + zero_one))*100)) %>%
+  filter(non_corr_rate != 999)
+
+# mean non-correction rate
+mean_sd_function(non_corr_rate_S2$non_corr_rate, 1)
+```
+
+#### S1 vs S2
+
+Study = dummy coding
+
+```{r NCR S1 S2 stat}
+temp = data %>% filter(study == 1 | study == 2) %>% 
+  filter(response_stage == "a" & conflict == "C") %>% 
+  filter(direction == "01" | direction == "11") %>% 
+  mutate(correct_int = if_else(direction == "01", 0, 1))
+
+# simple glm model
+model_int_S1_S2 = glm(correct_int ~ study, family = "binomial", data = temp)
+
+# max random structure
+formula = correct_int ~ study + (1|subject) + (study|item_number)
+
+# we find the best random structure  
+model = buildmer(formula, data = temp, family = "binomial", buildmerControl=buildmerControl(include = "study", args=list(control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))))
+
+final_formula = formula(model@model); final_formula
+
+# full mixed model
+model_int_S1_S2_1 = glmer(formula = final_formula, family = "binomial", data = temp, control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))
+
+# we check that mixed model better than linear model
+AIC(model_int_S1_S2, model_int_S1_S2_1)
+
+model_int_S1_S2_boot = bootstrap_model(
+  model_int_S1_S2_1,
+  iterations = 1000,
+  type = "parametric",
+  parallel = "multicore",
+  n_cpus = ncores,
+  cluster = NULL,
+  verbose =TRUE
+)
+
+save_load(model_int_S1_S2_boot, "save")
+
+model_int_S1_S2_boot = save_load(model_int_S1_S2_boot, "load") 
+
+summary(model_int_S1_S2_1)
+
+# get fixed effects and random effects
+b = bootstrap_parameters(model_int_S1_S2_boot, digits=3) %>% 
+  mutate(d = logoddsratio_to_d(Coefficient),
+         d_low = logoddsratio_to_d(CI_low),
+         d_high = logoddsratio_to_d(CI_high),
+    Coefficient = exp(Coefficient), CI_low = exp(CI_low), CI_high = exp(CI_high)); b
+model_parameters(model_int_S1_S2_1, effects="random")
+
+# get estimated means
+emm = emmeans::emmeans(model_int_S1_S2_boot, ~study, type = "response"); print(model_parameters(emm), digits=3)
+```
+
+### Conflict detection (confidence)
+
+#### No-conflict correct vs Conflict incorrect (classical measure)
+
+```{r conflict detection classical S2}
+# confidence as a function of conflict and accuracy
+temp = data %>% filter(study == 2) %>% 
+  filter(response_stage == "a") %>% 
+  group_by(subject, conflict, accuracy) %>%
+  summarise(mean_conf = mean(conf, na.rm=TRUE)) %>% ungroup() %>%
+  group_by(conflict, accuracy) %>%
+  summarise(mean_conf = mean_sd_function(mean_conf, 1))
+
+knitr::kable(temp)
+
+# we look only at the initial response stage
+data_2_CD <- data %>% filter(study == 2) %>% filter(response_stage == "a") %>%
+  mutate(biased = case_when(
+  conflict == "NC" & accuracy == 1 ~ "0",
+  conflict == "C" & accuracy == 0 ~ "1",
+  TRUE ~ "NA")) %>% filter(biased != "NA") %>%
+    group_by(subject, biased) %>% 
+  summarise(mean_conf = mean(conf, na.rm=TRUE)) %>% ungroup() %>% 
+  mutate(biased = factor(biased, levels = c("1", "0")))
+
+# desc stats
+data_2_CD %>% group_by(biased) %>% summarise(mean_sd_function(mean_conf, 1))
+```
+
+Biased = dummy coding
+
+```{r conflict detection S2 model}
+temp = data %>%
+  filter(study == 2 & response_stage == "a") %>% 
+  filter((conflict == "NC" & accuracy == 1) | (conflict == "C" & accuracy == 0)) %>% 
+  mutate(biased = if_else(conflict == "C", 1, 0))
+
+# simple beta regression model
+CD_S2_beta_model = betareg(betaconf ~ biased, data = temp)
+
+# max random structure
+formula = betaconf ~ biased + (biased|subject) + (biased|item_number)
+
+# we find the best random structure  
+model = buildglmmTMB(formula, data = temp, family = beta_family(), buildmerControl=buildmerControl(include = "biased"))
+
+final_formula = formula(model@model); final_formula
+
+# we build the model with the final formula
+CD_S2_beta_model_1 = glmmTMB(formula = final_formula, ziformula= ~0, family = beta_family(), data=temp)
+diagnose(CD_S2_beta_model_1)
+save_load(CD_S2_beta_model_1, "save")
+
+CD_S2_beta_model_1 = save_load(CD_S2_beta_model_1, "load")
+
+# we check that better fit to the data than simple model
+AIC(CD_S2_beta_model, CD_S2_beta_model_1)
+
+# we put more iterations because of convergence failures
+CD_S2_beta_model_boot = bootstrap_model(
+  CD_S2_beta_model_1,
+  iterations = 2050,
+  type = "parametric",
+  parallel = "multicore",
+  n_cpus = ncores,
+  cluster = NULL,
+  verbose =TRUE
+)
+save_load(CD_S2_beta_model_boot, "save")
+
+CD_S2_beta_model_boot = save_load(CD_S2_beta_model_boot, "load")
+
+summary(CD_S2_beta_model_1)
+
+# get fixed effects and random effects
+b = bootstrap_parameters(CD_S2_beta_model_boot) %>% 
+  mutate(d = logoddsratio_to_d(Coefficient),
+         d_low = logoddsratio_to_d(CI_low),
+         d_high = logoddsratio_to_d(CI_high),
+         Coefficient = exp(Coefficient), CI_low = exp(CI_low), CI_high = exp(CI_high)); b
+model_parameters(CD_S2_beta_model_1, effects="random")
+
+# estimated means
+emm = emmeans::emmeans(CD_S2_beta_model_boot, ~ biased, type = "response"); print(model_parameters(emm), digits=3)
+```
+
+Biased and study = dummy coded
+
+##### S1 vs S2
+
+```{r conflict detection S1 vs S2}
+temp = data %>%
+  filter((study == 1 | study == 2) & response_stage == "a") %>% 
+  filter((conflict == "NC" & accuracy == 1) | (conflict == "C" & accuracy == 0)) %>% 
+  mutate(biased = if_else(conflict == "C", 1, 0))
+
+# simple beta regression model
+CD_S1_S2_beta_model = betareg(betaconf ~ biased*study, data = temp)
+
+# max random structure
+formula = betaconf ~ biased*study + (biased|subject) + (biased*study|item_number)
+
+# we find the best random structure  
+model = buildglmmTMB(formula, data = temp, family = beta_family(), buildmerControl=buildmerControl(include = "biased*study"))
+ 
+final_formula = formula(model@model); final_formula
+
+# we build the model with the final formula
+CD_S1_S2_beta_model_1 = glmmTMB(formula = final_formula, ziformula= ~0, family = beta_family(), data=temp)
+diagnose(CD_S1_S2_beta_model_1)
+save_load(CD_S1_S2_beta_model_1, "save")
+
+CD_S1_S2_beta_model_1 = save_load(CD_S1_S2_beta_model_1, "load")
+
+# we check that better fit to the data than simple model
+AIC(CD_S1_S2_beta_model, CD_S1_S2_beta_model_1)
+
+# we put more iterations because of convergence failures
+CD_S1_S2_beta_model_boot = bootstrap_model(
+  CD_S1_S2_beta_model_1,
+  iterations = 3200,
+  type = "parametric",
+  parallel = "multicore",
+  n_cpus = ncores,
+  cluster = NULL,
+  verbose =TRUE
+)
+save_load(CD_S1_S2_beta_model_boot, "save")
+
+CD_S1_S2_beta_model_boot = save_load(CD_S1_S2_beta_model_boot, "load")
+
+# get fixed effects and random effects
+b = bootstrap_parameters(CD_S1_S2_beta_model_boot) %>% 
+  mutate(d = logoddsratio_to_d(Coefficient),
+         d_low = logoddsratio_to_d(CI_low),
+         d_high = logoddsratio_to_d(CI_high),
+         Coefficient = exp(Coefficient), CI_low = exp(CI_low), CI_high = exp(CI_high)); b
+model_parameters(CD_S1_S2_beta_model_1, effects="random")
+```
+
+#### No-conflict correct vs Conflict correct
+
+```{r conflict detection no-conflict correct vs conflict correct S2}
+# we look only at the initial response stage
+data_2_CD_correct <- data %>% filter(study == 2 & response_stage == "a") %>%
+  mutate(correct_conf = case_when(
+  conflict == "NC" & accuracy == 1 ~ "0",
+  conflict == "C" & accuracy == 1 ~ "1",
+  TRUE ~ "NA")) %>% filter(correct_conf != "NA") %>%
+    group_by(subject, correct_conf) %>% 
+  summarise(mean_conf = mean(conf)) %>% ungroup() %>% 
+  mutate(correct_conf = factor(correct_conf, levels = c("1", "0")))
+
+
+# desc stats
+data_2_CD_correct %>% group_by(correct_conf) %>% summarise(mean_sd_function(mean_conf, 1))
+```
+
+Correct conf = dummy coded
+
+```{r conflict correct conf S2}
+temp = data %>%
+  filter(study == 2 & response_stage == "a") %>% 
+  filter((conflict == "NC" & accuracy == 1) | (conflict == "C" & accuracy == 1)) %>% 
+  mutate(correct_conf = if_else(conflict == "C", 1, 0))
+
+# simple beta regression model
+corr_C_S2_beta_model = betareg(betaconf ~ correct_conf, data = temp)
+
+# max random structure
+formula = betaconf ~ correct_conf + (correct_conf|subject) + (correct_conf|item_number)
+
+# we find the best random structure  
+model = buildglmmTMB(formula, data = temp, family = beta_family(), buildmerControl=buildmerControl(include = "correct_conf"))
+
+final_formula = formula(model@model); final_formula
+
+# random structure unsupported or does not improve fit
+# we use robust SE instead
+a = coeftest(corr_C_S2_beta_model, vcov = vcovCL, cluster = ~ subject + item_number, type = "HC0"); round(a, 2)
+
+# compute effect size
+# eff size
+estimate <- 0.12
+std_error <- 0.11
+
+# Calculating the 95% confidence interval
+lower_bound <- estimate - (1.96 * std_error)
+upper_bound <- estimate + (1.96 * std_error)
+
+# Display the confidence interval
+c(lower_bound, upper_bound)
+
+# convert to cohen's d
+d = logoddsratio_to_d(estimate)
+d_low = logoddsratio_to_d(lower_bound)
+d_high = logoddsratio_to_d(upper_bound)
+
+d; d_low; d_high
+
+# estimated means
+emm = emmeans(corr_C_S2_beta_model, ~correct_conf, type = "response", vcov = sandwich::vcovCL(corr_C_S2_beta_model, cluster = ~subject + item_number)); emm
+```
+
+### Illusion strength
+
+Group = dummy coded
+
+```{r illusion strength study 2}
+# we compute the mean illusion strength for each item
+# initial no-conflict accuracy minus initial conflict accuracy
+illusion_strength <- data %>% filter(study == 2 & response_stage == "a") %>%
+  group_by(item_number, conflict) %>% 
+  summarise(mean_accu = mean(accuracy)*100) %>% 
+  pivot_wider(names_from = "conflict", values_from = "mean_accu") %>% 
+  mutate(illusion_strength = NC - C) %>% 
+  dplyr::select(item_number, illusion_strength)
+
+# compute mean and sd of illusion strength
+mean_illu = mean(illusion_strength$illusion_strength)
+sd_illu = sd(illusion_strength$illusion_strength)
+
+# we standardize the illusion strength
+illusion_strength <- illusion_strength %>%
+  mutate(illusion_strength = (illusion_strength - mean_illu) / sd_illu)
+
+# we join the tables; select the initial stage data
+# we create a variable named group: 0 for no-conflict correct (baseline),
+# 1 for conflict correct and 2 for conflict incorrect
+temp <- data %>% filter(study == 2 & response_stage == "a") %>% 
+  left_join(illusion_strength) %>% mutate(accuracy = as.factor(accuracy)) %>% 
+  mutate(group = as.factor(case_when(conflict== "NC" & accuracy == 1 ~ 0,
+                       conflict == "C" & accuracy == 1 ~ 1,
+                       conflict == "C" & accuracy == 0 ~ 2,
+                       TRUE ~ 3))) %>% filter(group != 3)
+
+# simple beta regression model
+model_illu_S2 = betareg(betaconf ~ group * illusion_strength, data = temp)
+
+# max random structure
+formula = betaconf ~ group * illusion_strength + (group*illusion_strength|subject)
+
+# we find the best random structure
+model = buildglmmTMB(formula, data = temp, family = beta_family(), buildmerControl=buildmerControl(include = "group * illusion_strength"))
+
+final_formula = formula(model@model); final_formula
+
+model_illu_S2_1 = glmmTMB(formula = final_formula, ziformula= ~0, family = beta_family(), data=temp)
+diagnose(model_illu_S2_1)
+save_load(model_illu_S2_1, "save")
+
+model_illu_S2_1 = save_load(model_illu_S2_1, "load")
+
+# random intercept by subjects fits the data better
+AIC(model_illu_S2, model_illu_S2_1)
+
+#parametric bootstrap
+model_illu_S2_boot = bootstrap_model(
+  model_illu_S2_1,
+  iterations = 1800,
+  type = "parametric",
+  parallel = "multicore",
+  n_cpus = ncores,
+  cluster = NULL,
+  verbose =TRUE
+)
+save_load(model_illu_S2_boot, "save")
+
+model_illu_S2_boot = save_load(model_illu_S2_boot, "load")
+
+# get fixed effects and random effects
+b = bootstrap_parameters(model_illu_S2_boot) %>% 
+  mutate(d = logoddsratio_to_d(Coefficient),
+         d_low = logoddsratio_to_d(CI_low),
+         d_high = logoddsratio_to_d(CI_high),
+         Coefficient = exp(Coefficient), CI_low = exp(CI_low), CI_high = exp(CI_high)); b
+model_parameters(model_illu_S2_1, effects = "random")
+```
+
+## Study 3 (comparison with Study 2)
+
+Note that this is the code for the additional two-response comparison experiment that is not reported in the paper. The study referred to as study 4 is the code is actually referred to as Experiment 3 in the paper.
+
+### Accuracy as a function of impostor strength and response stage (anomaly responses)
+
+Impostor and response stage = sum coding
+
+```{r accuracy as a function of impostor strength and response stage anomaly S3}
+temp = data %>% filter(study == 2 | study == 3) %>%
+  filter(conflict == "C") %>% 
+  mutate(impostor = factor(impostor, levels=c("strong", "weak")),
+         response_stage = factor(response_stage, levels=c("a", "b")))
+  
+# we set sum coding
+contrasts(temp$impostor) = contr.sum(levels(temp$impostor))
+contrasts(temp$response_stage) = contr.sum(levels(temp$response_stage))
+
+# simple glm model
+model_accu_S3 = glm(accuracy ~ impostor*response_stage, family = "binomial", data = temp)
+
+# max random structure
+formula = accuracy ~ impostor*response_stage + (response_stage|subject) + (impostor*response_stage|item_number)
+
+# we find the best random structure  
+model = buildmer(formula, data = temp, family = "binomial", buildmerControl=buildmerControl(include = "impostor*response_stage", args=list(control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))))
+
+final_formula = formula(model@model); final_formula
+
+# we run the model with the final formula
+model_accu_S3_1 = mixed(formula = final_formula, family = "binomial", data = temp, control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)), expand_re = TRUE, method = "PB", progress=TRUE, args_test = list(nsim = 1000, seed = 123, cl = ncores))
+save_load(model_accu_S3_1, "save")
+
+# we load it
+model_accu_S3_1 = save_load(model_accu_S3_1, "load")
+
+# we check that better fit than simple glm model
+AIC(model_accu_S3, model_accu_S3_1$full_model)
+
+# get the fixed effects and random effects
+nice(model_accu_S3_1)
+model_parameters(model_accu_S3_1$full_model, effects="random")
+```
+
+### Accuracy as a function of impostor strength and response stage (no-anomaly responses)
+
+Impostor and response stage = sum coding
+
+```{r accuracy as a function of impostor strength and response stage no anomaly S3}
+temp = data %>% filter(study == 2 | study == 3) %>%
+  filter(conflict == "NC") %>% 
+  mutate(impostor = factor(impostor, levels=c("strong", "weak")),
+         response_stage = factor(response_stage, levels=c("a", "b")))
+  
+# we set sum coding
+contrasts(temp$impostor) = contr.sum(levels(temp$impostor))
+contrasts(temp$response_stage) = contr.sum(levels(temp$response_stage))
+
+# simple glm model
+model_accu_S3_NC = glm(accuracy ~ impostor*response_stage, family = "binomial", data = temp)
+
+# max random structure
+formula = accuracy ~ impostor*response_stage + (response_stage|subject) + (impostor*response_stage|item_number)
+
+# we find the best random structure
+model = buildmer(formula, data = temp, family = "binomial", buildmerControl=buildmerControl(include = "impostor*response_stage", args=list(control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))))
+
+final_formula = formula(model@model); final_formula
+
+# we run the model with the final formula
+model_accu_S3_NC_1 = mixed(formula = final_formula, family = "binomial", data = temp, control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)), expand_re = TRUE, method = "PB", progress=TRUE, args_test = list(nsim = 1000, seed = 123, cl = ncores))
+save_load(model_accu_S3_NC_1, "save")
+
+# we load it
+model_accu_S3_NC_1 = save_load(model_accu_S3_NC_1, "load")
+
+# we check that better fit than simple glm model
+AIC(model_accu_S3_NC, model_accu_S3_NC_1$full_model)
+
+# get fixed effects and random effects
+nice(model_accu_S3_NC_1)
+model_parameters(model_accu_S3_NC_1$full_model, effects="random")
+```
+
+```{r type of errors S3}
+# accuracy NC
+temp = data %>% filter(study == 3) %>%  
+  filter(conflict == "NC") %>% group_by(response_stage, subject) %>% 
+  summarise(mean_acc = mean(accuracy)*100) %>% 
+  group_by(response_stage) %>% 
+  summarise(mean_acc = mean(mean_acc)); temp
+
+# % errors C
+temp = data %>% filter(study == 3) %>%  
+  filter(conflict == "C") %>% group_by(response_stage, subject) %>% 
+  summarise(mean_acc = mean(accuracy)*100) %>% 
+  group_by(response_stage) %>% 
+  summarise(mean_acc = 100 - mean(mean_acc)); temp
+
+temp = data %>% filter(study == 3) %>%  
+  filter(accuracy == 0 & conflict == "C") %>% group_by(response_stage, subject) %>% 
+  summarise(percent_true = percent_function(1, resp_cat),
+            percent_filler = percent_function(2, resp_cat),
+            percent_DK = percent_function(4, resp_cat)) %>%
+              ungroup() %>% 
+  group_by(response_stage) %>%
+  summarise(percent_undistorted = mean(percent_true),
+            percent_filler = mean(percent_filler),
+            percent_DK = mean(percent_DK))
+
+knitr::kable(temp, digits=1)
+```
+
+### Direction of change
+
+```{r direction of change S3}
+# we compute the proportion of directions of change for each subject
+data_direction_3 <- data %>% filter(study == 3 & response_stage == "a") %>%
+  dplyr::select(subject, conflict, direction) %>% 
+  group_by(subject, conflict, direction) %>%
+  mutate(count_per_dir = n()) %>% ungroup() %>% distinct() %>% group_by(conflict) %>% 
+  complete(subject, direction, fill = list(count_per_dir = 0)) %>% 
+  ungroup() %>%
+  group_by(subject, conflict) %>%
+  mutate(proportion = 100 * count_per_dir / sum(count_per_dir))  %>% 
+  ungroup()
+
+# descriptive stats as a function of conflict
+data_direction_desc <- data_direction_3 %>% 
+  group_by(conflict, direction) %>%
+  summarise(mean_sd = mean_sd_function(proportion, 1)) %>%
+  arrange(desc(conflict))
+
+knitr::kable(data_direction_desc)
+
+# we compute the individual non-correction rate for each participant
+# n = 90 / 100
+non_corr_rate_S3 <- data_direction_3 %>% filter(conflict == "C") %>% 
+  filter(direction == "11" | direction == "01") %>% dplyr::select(-count_per_dir) %>% 
+  pivot_wider(names_from = direction, values_from = proportion) %>% 
+  rename(one_one = "11",
+         zero_one = "01") %>% 
+  mutate(non_corr_rate = case_when(
+    one_one == 0 & zero_one == 0 ~ 999,
+         one_one == 0 ~ 0,
+         zero_one == 0 ~ 100,
+         TRUE ~ (one_one / (one_one + zero_one))*100)) %>%
+  filter(non_corr_rate != 999)
+
+# mean non-correction rate
+mean_sd_function(non_corr_rate_S3$non_corr_rate, 1)
+```
+
+### S2 vs S3
+
+Study = dummy coding
+
+```{r 01 vs 11 S2 vs S3}
+temp= data %>% filter(conflict == "C" & response_stage == "a") %>% 
+  filter(study == 2 | study == 3) %>% 
+  filter(direction == "11" | direction == "01") %>% 
+  mutate(correct_int = if_else(direction == "11", 1, 0))
+
+# simple glm model
+model_int_S2_S3 = glm(correct_int ~ study, family = "binomial", data = temp)
+
+# max random structure
+formula = correct_int ~ study + (1|subject) + (study|item_number)
+
+# we find the best random structure  
+model = buildmer(formula, data = temp, family = "binomial", buildmerControl=buildmerControl(include = "study", args=list(control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))))
+
+final_formula = formula(model@model); final_formula
+
+model_int_S2_S3_1 = glmer(formula = final_formula, family = "binomial", data = temp, control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) 
+
+# we check that mixed model better than linear model
+AIC(model_int_S2_S3, model_int_S2_S3_1)
+
+model_int_S2_S3_boot = bootstrap_model(
+  model_int_S2_S3_1,
+  iterations = 1000,
+  type = "parametric",
+  parallel = "multicore",
+  n_cpus = ncores,
+  cluster = NULL,
+  verbose =TRUE
+)
+
+save_load(model_int_S2_S3_boot, "save")
+
+model_int_S2_S3_boot = save_load(model_int_S2_S3_boot, "load") 
+
+# get fixed effects and random effects
+b = bootstrap_parameters(model_int_S2_S3_boot, digits=3) %>% 
+  mutate(d = logoddsratio_to_d(Coefficient),
+         d_low = logoddsratio_to_d(CI_low),
+         d_high = logoddsratio_to_d(CI_high),
+    Coefficient = exp(Coefficient), CI_low = exp(CI_low), CI_high = exp(CI_high)); b
+model_parameters(model_int_S2_S3_1, effects="random")
+
+
+# estimated means
+emm = emmeans::emmeans(model_int_S2_S3_boot, ~study, type = "response"); print(model_parameters(emm), digits=3)
+```
+
+### Conflict modulation as a function of impostor strength and accuracy
+
+```{r descriptive stats conf as a function of  accuracy * anomaly * impostor (S2 vs S3)}
+# we compute the mean accuracy for each subject
+data_conf_S2_S3 <- data %>% filter(study == 2 | study == 3) %>%
+  filter(response_stage == "a") %>% 
+  group_by(subject, conflict, accuracy) %>%
+  summarise(mean_conf = mean(conf, na.rm=TRUE),
+            impostor = unique(impostor)) %>% ungroup() %>%
+  group_by(conflict, accuracy, impostor) %>%
+  summarise(mean_conf = mean_sd_function(mean_conf, 1)) %>% ungroup()
+
+knitr::kable(data_conf_S2_S3, title = "Confidence as a function of accuracy, anomaly and impostor strength", align = c("c", "c", "c", "r"))
+```
+
+
+Group and impostor = dummy coding.
+
+```{r conflict detection impostor strength accuracy}
+# we join the tables; select the initial stage data
+# we create a variable named group: 0 for no-conflict correct (baseline),
+# 1 for conflict correct and 2 for conflict incorrect
+temp <- data %>% filter((study == 2 | study == 3) & response_stage == "a") %>%
+  mutate(accuracy = as.factor(accuracy)) %>% 
+  mutate(group = as.factor(case_when(conflict== "NC" & accuracy == 1 ~ 0,
+                       conflict == "C" & accuracy == 1 ~ 1,
+                       conflict == "C" & accuracy == 0 ~ 2,
+                       TRUE ~ 3))) %>% filter(group != 3)
+
+# simple beta regression model
+model_conf_S3 = betareg(betaconf ~ group * impostor, data = temp)
+
+# max random structure
+formula = betaconf ~ group * impostor + (group|subject) + (group*impostor|item_number)
+
+# we find the best random structure  
+model = buildglmmTMB(formula, data = temp, family = beta_family(), buildmerControl=buildmerControl(include = "group * impostor"))
+
+final_formula = formula(model@model); final_formula
+
+model_conf_S3_1 = glmmTMB(formula = final_formula, ziformula= ~0, family = beta_family(), data=temp)
+diagnose(model_conf_S3_1)
+
+# mixed model better fit to the data
+AIC(model_conf_S3, model_conf_S3_1)
+
+# we put more iterations because of convergence failures
+model_conf_S3_boot = bootstrap_model(
+  model_conf_S3_1,
+  iterations = 20000,
+  type = "parametric",
+  parallel = "multicore",
+  n_cpus = ncores,
+  cluster = NULL,
+  verbose =TRUE
+)
+save_load(model_conf_S3_boot, "save")
+
+model_conf_S3_boot = save_load(model_conf_S3_boot, "load")
+
+summary(model_conf_S3_1)
+
+b = bootstrap_parameters(model_conf_S3_boot) %>% 
+  mutate(d = logoddsratio_to_d(Coefficient),
+         d_low = logoddsratio_to_d(CI_low),
+         d_high = logoddsratio_to_d(CI_high),
+         Coefficient = exp(Coefficient), CI_low = exp(CI_low), CI_high = exp(CI_high)); b
+model_parameters(model_conf_S3_1, effects="random")
+
+# estimated means
+emm = emmeans::emmeans(model_conf_S3_boot, ~ impostor|group, interaction = "consec", type = "response"); print(model_parameters(emm), digits=3)
+```
+
+### Supplementary - Confidence as a function of direction of change (S1 & S2)
+
+#### Study 1
+
+Dummy coding
+
+```{r conf dir change S1}
+# STUDY 1
+temp <- data %>%
+  filter(study == 1) %>% mutate(conflict = factor(conflict, levels=c("NC", "C")))
+
+# one model for each direction of change category vs the NC 11 baseline
+```
+
+```{r conf dir change S1 00}
+# 00 direction 
+data_1_00 <- temp %>% filter(response_stage == "a") %>% 
+  filter((conflict == "C" & direction == "00") | (conflict == "NC" & direction == "11"))
+
+# simple beta regression model
+model_00 = betareg(betaconf ~ conflict, data = data_1_00)
+
+# max random structure
+formula = betaconf ~ conflict + (conflict|subject) + (conflict|item_number)
+
+# we find the best random structure
+model = buildglmmTMB(formula, data = data_1_00, family = beta_family(), buildmerControl=buildmerControl(include = "conflict"))
+
+final_formula = formula(model@model); final_formula
+
+# # we build the model with the final formula
+model_00_1 = glmmTMB(formula = final_formula, ziformula= ~0, family = beta_family(), data=data_1_00)
+diagnose(model_00_1)
+save_load(model_00_1, "save")
+
+model_00_1 = save_load(model_00_1, "load")
+
+# we check that better fit to the data than simple model
+AIC(model_00, model_00_1)
+
+# we put more iterations because of convergence failures
+model_00_boot = bootstrap_model(
+  model_00_1,
+  iterations = 1800,
+  type = "parametric",
+  parallel = "multicore",
+  n_cpus = ncores,
+  cluster = NULL,
+  verbose =TRUE
+)
+save_load(model_00_boot, "save")
+
+model_00_boot = save_load(model_00_boot, "load")
+
+# get fixed effects and random effects
+b = bootstrap_parameters(model_00_boot) %>% 
+  mutate(d = logoddsratio_to_d(Coefficient),
+         d_low = logoddsratio_to_d(CI_low),
+         d_high = logoddsratio_to_d(CI_high),
+         Coefficient = exp(Coefficient), CI_low = exp(CI_low), CI_high = exp(CI_high)); b
+model_parameters(model_00_1, effects = "random")
+```
+
+```{r conf dir change S1 11}
+## 11 direction
+data_1_11 <- temp %>% filter(response_stage == "a") %>% 
+  filter((conflict == "C" & direction == "11") | (conflict == "NC" & direction == "11"))
+
+# simple beta regression model
+model_11 = betareg(betaconf ~ conflict, data = data_1_11)
+
+# max random structure
+formula = betaconf ~ conflict + (conflict|subject) + (conflict|item_number)
+
+# we find the best random structure
+model = buildglmmTMB(formula, data = data_1_11, family = beta_family(), buildmerControl=buildmerControl(include = "conflict"))
+
+final_formula = formula(model@model); final_formula
+
+# random structure unsupported or does not improve fit
+# we use robust SE instead
+coeftest(model_11, vcov = vcovCL, cluster = ~ subject + item_number, type = "HC0")
+```
+
+```{r conf dir change S1 01}
+# 01 direction 
+data_1_01 <- temp %>% filter(response_stage == "a") %>% 
+  filter((conflict == "C" & direction == "01") | (conflict == "NC" & direction == "11"))
+
+# simple beta regression model
+model_01 = betareg(betaconf ~ conflict, data = data_1_01)
+
+# max random structure
+formula = betaconf ~ conflict + (conflict|subject) + (conflict|item_number)
+
+# we find the best random structure
+model = buildglmmTMB(formula, data = data_1_01, family = beta_family(), buildmerControl=buildmerControl(include = "conflict"))
+
+final_formula = formula(model@model); final_formula
+
+# random structure unsupported or does not improve fit
+# we use robust SE instead
+coeftest(model_01, vcov = vcovCL, cluster = ~ subject + item_number, type = "HC0")
+```
+
+
+```{r conf dir change S1 10}
+# 10 direction 
+data_1_10 <- temp %>% filter(response_stage == "a") %>% 
+  filter((conflict == "C" & direction == "10") | (conflict == "NC" & direction == "11"))
+
+# simple beta regression model
+model_10 = betareg(betaconf ~ conflict, data = data_1_10)
+
+# # max random structure
+formula = betaconf ~ conflict + (conflict|subject) + (conflict|item_number)
+
+# we find the best random structure
+model = buildglmmTMB(formula, data = data_1_10, family = beta_family(), buildmerControl=buildmerControl(include = "conflict"))
+
+final_formula = formula(model@model); final_formula
+
+# we build the model with the final formula
+model_10_1 = glmmTMB(formula = final_formula, ziformula= ~0, family = beta_family(), data=data_1_10)
+diagnose(model_10_1)
+save_load(model_10_1, "save")
+
+model_10_1 = save_load(model_10_1, "load")
+
+# we check that better fit to the data than simple model
+AIC(model_10, model_10_1)
+
+# we put more iterations because of convergence failures
+model_10_boot = bootstrap_model(
+  model_10_1,
+  iterations = 1800,
+  type = "parametric",
+  parallel = "multicore",
+  n_cpus = ncores,
+  cluster = NULL,
+  verbose =TRUE
+)
+save_load(model_10_boot, "save")
+
+model_10_boot = save_load(model_10_boot, "load")
+
+model_parameters(model_10_1, effects = "random")
+
+b = bootstrap_parameters(model_10_boot) %>% 
+  mutate(d = logoddsratio_to_d(Coefficient),
+         d_low = logoddsratio_to_d(CI_low),
+         d_high = logoddsratio_to_d(CI_high),
+         Coefficient = exp(Coefficient), CI_low = exp(CI_low), CI_high = exp(CI_high)); b
+model_parameters(model_10_1, effects = "random")
+```
+
+#### Study 2
+
+```{r conf dir change S2}
+# study 2
+temp <- data %>%
+  filter(study == 2) %>% mutate(conflict = factor(conflict, levels=c("NC", "C")))
+
+# one model for each direction of change category vs the NC 11 baseline
+```
+
+
+```{r conf dir change S2 00}
+# 00 direction 
+data_2_00 <- temp %>% filter(response_stage == "a") %>% 
+  filter((conflict == "C" & direction == "00") | (conflict == "NC" & direction == "11"))
+
+# simple beta regression model
+model_00 = betareg(betaconf ~ conflict, data = data_2_00)
+
+# max random structure
+formula = betaconf ~ conflict + (conflict|subject) + (conflict|item_number)
+
+# we find the best random structure
+model = buildglmmTMB(formula, data = data_2_00, family = beta_family(), buildmerControl=buildmerControl(include = "conflict"))
+
+final_formula = formula(model@model); final_formula
+
+# # we build the model with the final formula
+model_00_2 = glmmTMB(formula = final_formula, ziformula= ~0, family = beta_family(), data=data_2_00)
+diagnose(model_00_2)
+save_load(model_00_2, "save")
+
+model_00_2 = save_load(model_00_2, "load")
+
+# we check that better fit to the data than simple model
+AIC(model_00, model_00_2)
+
+# we put more iterations because of convergence failures
+model_00_2_boot = bootstrap_model(
+  model_00_2,
+  iterations = 1600,
+  type = "parametric",
+  parallel = "multicore",
+  n_cpus = ncores,
+  cluster = NULL,
+  verbose =TRUE
+)
+save_load(model_00_2_boot, "save")
+
+model_00_2_boot = save_load(model_00_2_boot, "load")
+
+# get FE and random effects
+b = bootstrap_parameters(model_00_2_boot) %>% 
+  mutate(d = logoddsratio_to_d(Coefficient),
+         d_low = logoddsratio_to_d(CI_low),
+         d_high = logoddsratio_to_d(CI_high),
+         Coefficient = exp(Coefficient), CI_low = exp(CI_low), CI_high = exp(CI_high)); b
+model_parameters(model_00_2, effects = "random", exponentiate = TRUE)
+```
+
+```{r conf dir change S2 11}
+## 11 direction 
+data_2_11 <- temp %>% filter(response_stage == "a") %>% 
+  filter((conflict == "C" & direction == "11") | (conflict == "NC" & direction == "11"))
+
+# simple beta regression model
+model_11_2 = betareg(betaconf ~ conflict, data = data_2_11)
+
+# max random structure
+formula = betaconf ~ conflict + (conflict|subject) + (conflict|item_number)
+
+# we find the best random structure
+model = buildglmmTMB(formula, data = data_2_11, family = beta_family(), buildmerControl=buildmerControl(include = "conflict"))
+
+final_formula = formula(model@model); final_formula
+
+# random structure unsupported or does not improve fit
+# we use robust SE instead
+coeftest(model_11_2, vcov = vcovCL, cluster = ~ subject + item_number, type = "HC0")
+```
+
+```{r conf dir change S2 01}
+# 01 direction 
+data_2_01 <- temp %>% filter(response_stage == "a") %>% 
+  filter((conflict == "C" & direction == "01") | (conflict == "NC" & direction == "11"))
+
+# simple beta regression model
+model_01_2 = betareg(betaconf ~ conflict, data = data_2_01)
+
+# max random structure
+formula = betaconf ~ conflict + (conflict|subject) + (conflict|item_number)
+
+# we find the best random structure
+model = buildglmmTMB(formula, data = data_2_01, family = beta_family(), buildmerControl=buildmerControl(include = "conflict"))
+
+final_formula = formula(model@model); final_formula
+
+# random structure unsupported or does not improve fit
+# we use robust SE instead
+coeftest(model_01_2, vcov = vcovCL, cluster = ~ subject + item_number, type = "HC0")
+```
+
+
+```{r conf dir change S2 10}
+# 10 direction 
+data_2_10 <- temp %>% filter(response_stage == "a") %>% 
+  filter((conflict == "C" & direction == "10") | (conflict == "NC" & direction == "11"))
+
+# simple beta regression model
+model_10_2 = betareg(betaconf ~ conflict, data = data_2_10)
+
+# max random structure
+formula = betaconf ~ conflict + (conflict|subject) + (conflict|item_number)
+
+# we find the best random structure
+model = buildglmmTMB(formula, data = data_2_10, family = beta_family(), buildmerControl=buildmerControl(include = "conflict"))
+
+final_formula = formula(model@model); final_formula
+
+# random structure unsupported or does not improve fit
+# we use robust SE instead
+coeftest(model_10_2, vcov = vcovCL, cluster = ~ subject + item_number, type = "HC0")
+```
+
+### "11" proportion vs 6.25 % proportion (Study 1-2-3)
+
+```{r guessing 6.25%}
+temp = data %>% 
+  filter(study != "one_resp_pre_test" & response_stage == "a" & conflict == "C") %>%
+  dplyr::select(subject, direction) %>% 
+  group_by(subject, direction) %>% 
+  mutate(count_per_dir = n()) %>% distinct() %>% 
+  ungroup() %>% 
+  complete(subject, direction, fill = list(count_per_dir = 0)) %>%
+  group_by(subject) %>%
+  mutate(proportion = 100 * count_per_dir / sum(count_per_dir))  %>% 
+  ungroup() %>% 
+  mutate(study = case_when(
+      str_starts(subject, "1_") ~ 1,
+      str_starts(subject, "2_") ~ 2,
+      str_starts(subject, "3_") ~ 3)) %>% 
+  filter(direction == "11")
+  
+ggplot(temp, aes(x = proportion, fill = as.factor(study))) +
+  geom_density(alpha = 0.5) +  # Adjust alpha for transparency
+  labs(title = "Density Plot of Proportion for Direction 11",
+       x = "Proportion (%)",
+       y = "Density",
+       fill = "Experiment") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set1") +  # Use a color palette that is distinct
+  facet_wrap(~ study, scales = "free")  # Create separate plots for each study
+
+data_direction_3 <- data %>% filter(study == 3 & response_stage == "a") %>%
+  dplyr::select(subject, conflict, direction) %>% 
+  group_by(subject, conflict, direction) %>%
+  mutate(count_per_dir = n()) %>% ungroup() %>% distinct() %>% group_by(conflict) %>% 
+  complete(subject, direction, fill = list(count_per_dir = 0)) %>% 
+  ungroup() %>%
+  group_by(subject, conflict) %>%
+  mutate(proportion = 100 * count_per_dir / sum(count_per_dir))  %>% 
+  ungroup()
+
+# Perform one-sample t-test for each study
+results <- list()
+
+# List of unique studies
+studies <- unique(temp$study)
+
+for (study in studies) {
+  # Extract the proportions for the current study
+  study_data <- temp[temp$study == study, ]
+  
+  # Perform the t-test comparing the study data against the benchmark
+  t_test_result <- t.test(study_data$proportion, mu = 6.25, alternative = "greater")
+  
+  # Store the result in the list
+  results[[paste("Study", study)]] <- t_test_result
+}
+
+# Display the results
+results
+```
+
+## Figures
+
+### Accuracy and Direction of Change in Study 1 and Study 2
+
+```{r accu dir of change S1 S2 fig prep}
+# accu S1 S2
+data_1_2_perf <- data %>% filter(study == 1 | study == 2) %>% group_by(subject, response_stage, conflict, study) %>% 
+  summarise(accu = mean(accuracy, na.rm=TRUE)*100) %>% 
+  mutate(anomaly_presence = factor(if_else(conflict == "C", "Anomaly", "No-anomaly"), levels = c("Anomaly", "No-anomaly")),
+         Experiment = as.factor(study),
+         Experiment = if_else(Experiment == 1, "Experiment 1", "Experiment 2"),
+         response_stage = factor(if_else(response_stage == "b", "Final", "Initial"), levels=c("Initial", "Final")))
+
+
+## dir change S1 S2
+data_1_2_dir <- data %>%  filter(response_stage == "a" & (study == 1 | study == 2)) %>% dplyr::select(subject, conflict, direction) %>% 
+  group_by(subject, conflict, direction) %>%
+  mutate(count_per_dir = n()) %>% ungroup() %>% distinct() %>% group_by(conflict) %>% 
+  complete(subject, direction, fill = list(count_per_dir = 0)) %>% 
+  ungroup() %>%
+  group_by(subject, conflict) %>%
+  mutate(proportion = 100 * count_per_dir / sum(count_per_dir))  %>% 
+  ungroup() %>% 
+  mutate(anomaly_presence = factor(if_else(conflict == "C", "Anomaly", "No-anomaly"), levels = c("Anomaly", "No-anomaly")),
+         Experiment = as.factor(if_else(str_detect(subject, "^1"), "Experiment 1", "Experiment 2")))
+```
+
+
+```{r accu dir of change S1 S2 fig}
+# accu plot
+# set the offset position of the geoms
+pos <- position_dodge(0.9)
+
+plot_accu_s1_s2 <- ggplot(data_1_2_perf, aes(x=response_stage, y=accu, fill=Experiment)) +
+  geom_boxplot(fatten = 1.75, position = pos, outlier.shape = NA, alpha=0.5, aes(color = Experiment)) +
+  stat_summary(fun.data = "mean_se", 
+               geom = "errorbar", 
+               position = pos, show.legend=FALSE, width=0.25) +
+    stat_summary(fun = "mean", geom="point", position = pos, show.legend = FALSE) +
+  labs(y = "Accuracy (%)", x = "Response stage") +
+   theme_classic() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10)) +
+  scale_fill_manual(values=c("#005AB5", "#DC3220")) +
+  scale_color_manual(values=c("#005AB5", "#DC3220")) +
+  scale_y_continuous(limits=c(-2,105), expand = c(0, 0)) +
+  facet_grid(. ~ anomaly_presence)
+
+# dir plot
+plot_dir_s1_s2 <- ggplot(data_1_2_dir, aes(x=direction, y=proportion, fill=Experiment)) +
+  geom_boxplot(fatten = 1.75,vposition = pos, outlier.shape = NA, show.legend=FALSE, alpha = 0.5, aes(color=Experiment)) +
+     stat_summary(fun.data = "mean_se", 
+               geom = "errorbar", 
+               position = pos, show.legend=FALSE, width=0.25) +
+    stat_summary(fun = "mean", geom="point", position = pos, show.legend = FALSE) +
+  labs(y = "Proportion (%)", x = "Direction of change") +
+   theme_classic() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10), legend.position="none") + scale_fill_manual(values=c("#005AB5", "#DC3220")) + scale_color_manual(values=c("#005AB5", "#DC3220")) +
+    scale_y_continuous(limits=c(-2,105), expand = c(0, 0)) +
+  facet_grid(. ~ anomaly_presence)
+
+
+plot_accu_dir_S1_S2 <- ggarrange(plot_accu_s1_s2, plot_dir_s1_s2, ncol=1, nrow=2, labels = c("a", "b"), hjust = c(0, 0)); 
+
+
+ggsave(filename = "Output/Fig2_accu_dir_S1_S2.png", plot = plot_accu_dir_S1_S2, device = "png", width = 6, height = 6, units = "in", dpi = 600)
+```
+
+### Initial confidence ratings as a function of accuracy and direction of change in Study 1 and Study 2
+
+```{r fig conf S1 S2}
+# conf S1 S2
+data_1_2_conf <- data %>% filter(response_stage == "a" & (study == 1 | study == 2)) %>% group_by(subject, accuracy, conflict, study) %>% 
+  summarise(conf = mean(conf, na.rm=TRUE)) %>% 
+  mutate(anomaly_presence = factor(if_else(conflict == "C", "Anomaly", "No-anomaly"), levels = c("Anomaly", "No-anomaly")),
+         Experiment = as.factor(study),
+         Experiment = if_else(Experiment == 1, "Experiment 1", "Experiment 2"),
+         accuracy = factor(if_else(accuracy == 1, "Correct", "Incorrect"), levels=c("Correct", "Incorrect")))
+
+data_1_2_conf %>% 
+  group_by(Experiment, anomaly_presence, accuracy) %>% 
+  summarise(mean_c = mean(conf))
+
+## dir change S1 S2
+data_1_2_dir_conf <- data %>%  filter(response_stage == "a" & (study == 1 | study == 2)) %>%   group_by(subject, direction, conflict) %>%
+  summarise(conf = mean(conf, na.rm=TRUE)) %>% 
+  mutate(anomaly_presence = factor(if_else(conflict == "C", "Anomaly", "No-anomaly"), levels = c("Anomaly", "No-anomaly")),
+          Experiment = as.factor(if_else(str_detect(subject, "^1"), "Experiment 1", "Experiment 2"))) %>% 
+  filter(conflict == "C")
+                                  
+# accu plot
+# set the offset position of the geoms
+pos <- position_dodge(0.9)
+
+plot_conf_s1_s2 <- ggplot(data_1_2_conf, aes(x=accuracy, y=conf, fill=Experiment)) +
+ geom_boxplot(fatten = 1.75, position = pos, outlier.shape = NA, alpha = 0.5, aes(color=Experiment)) +
+  stat_summary(fun.data = "mean_se", geom="errorbar", position=pos, show.legend = FALSE, width = 0.25) +
+  stat_summary(fun = "mean", geom="point", position = pos, show.legend = FALSE) +
+  labs(y = "Initial confidence (%)", x = "Initial response") +
+   theme_classic() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10)) +
+  scale_fill_manual(values=c("#005AB5", "#DC3220")) +
+  scale_color_manual(values=c("#005AB5", "#DC3220")) +
+  scale_y_continuous(limits=c(-2,105), expand = c(0, 0)) +
+  facet_grid(. ~ anomaly_presence)
+
+# dir plot
+plot_dir_conf_s1_s2 <- ggplot(data_1_2_dir_conf, aes(x=direction, y=conf, fill=Experiment)) +
+  geom_boxplot(fatten = 1.75, position = pos, outlier.shape = NA, alpha = 0.5, aes(color=Experiment)) +
+     stat_summary(fun.data = "mean_se", 
+               geom = "errorbar", 
+               position = pos, show.legend=FALSE, width=0.25) +
+    stat_summary(fun = "mean", geom="point", position = pos, show.legend = FALSE) +
+  labs(y = "Initial confidence (%)", x = "Direction of change") +
+   theme_classic() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10)) + scale_fill_manual(values=c("#005AB5", "#DC3220")) +
+  scale_color_manual(values=c("#005AB5", "#DC3220")) +
+  scale_y_continuous(limits=c(-2,105), expand = c(0, 0)) +
+  facet_grid(. ~ anomaly_presence)
+
+
+ggsave(filename = "Output/Fig3_conf_accu_S1_S2.png", plot = plot_conf_s1_s2, device = "png", width = 6, height = 6, units = "in", dpi = 600)
+
+ggsave(filename = "Output/Supp_conf_dir_S1_S2.png", plot = plot_dir_conf_s1_s2, device = "png", width = 6, height = 6, units = "in", dpi = 600)
+```
+
+### Illusion strength analysis - S1 & S2
+
+```{r predictions illu strength}
+# we compute the mean illusion strength for each item
+# initial no-conflict accuracy minus initial conflict accuracy
+illusion_strength <- data %>% filter(study == 1 & response_stage == "a") %>%
+  group_by(item_number, conflict) %>%
+  summarise(mean_accu = mean(accuracy)*100) %>%
+  pivot_wider(names_from = "conflict", values_from = "mean_accu") %>%
+  mutate(illusion_strength = NC - C) %>%
+  dplyr::select(item_number, illusion_strength)
+
+# we join the tables; select the initial stage data
+# we create a variable named group: 0 for no-conflict correct (baseline),
+# 1 for conflict correct and 2 for conflict incorrect
+temp_illu_S1 <- data %>% filter(study == 1 & response_stage == "a") %>%
+  left_join(illusion_strength) %>% mutate(accuracy = as.factor(accuracy)) %>%
+  mutate(group = as.factor(case_when(conflict== "NC" & accuracy == 1 ~ 0,
+                       conflict == "C" & accuracy == 1 ~ 1,
+                       conflict == "C" & accuracy == 0 ~ 2,
+                       TRUE ~ 3))) %>% filter(group != 3)
+
+# simple beta regression model
+model_illu_S1 = betareg(betaconf ~ group * illusion_strength, data = temp_illu_S1)
+
+predicted_illu_S1= summary(emmeans::emmeans(model_illu_S1, ~group*illusion_strength, type = "response",  at = list(illusion_strength = seq(27, 96, by=0.1))), vcov = sandwich::vcovCL(model_illu_S1, cluster = ~subject)) %>% 
+  mutate(group = case_when(
+  group == 0 ~ "No-anomaly correct",
+  group == 1 ~ "Anomaly correct",
+  group == 2 ~ "Anomaly incorrect"),
+  group = factor(group, levels = c("No-anomaly correct", "Anomaly correct", "Anomaly incorrect")),
+  response = emmean *100,
+  conf.low = asymp.LCL*100,
+  conf.high = asymp.UCL*100,
+          Experiment = "Experiment 1") %>% 
+  dplyr::select(Experiment, illusion_strength, group, response, conf.low, conf.high)
+
+# we compute the mean illusion strength for each item
+# initial no-conflict accuracy minus initial conflict accuracy
+illusion_strength <- data %>% filter(study == 2 & response_stage == "a") %>%
+  group_by(item_number, conflict) %>%
+  summarise(mean_accu = mean(accuracy)*100) %>%
+  pivot_wider(names_from = "conflict", values_from = "mean_accu") %>%
+  mutate(illusion_strength = NC - C) %>%
+  dplyr::select(item_number, illusion_strength)
+
+
+# we join the tables; select the initial stage data
+# we create a variable named group: 0 for no-conflict correct (baseline),
+# 1 for conflict correct and 2 for conflict incorrect
+temp_illu_S2 <- data %>% filter(study == 2 & response_stage == "a") %>%
+  left_join(illusion_strength) %>% mutate(accuracy = as.factor(accuracy)) %>%
+  mutate(group = as.factor(case_when(conflict== "NC" & accuracy == 1 ~ 0,
+                       conflict == "C" & accuracy == 1 ~ 1,
+                       conflict == "C" & accuracy == 0 ~ 2,
+                       TRUE ~ 3))) %>% filter(group != 3)
+
+temp = temp_illu_S2
+model_illu_S2_boot = save_load(model_illu_S2_boot, "load")
+
+b = bootstrap_parameters(model_illu_S2_boot)
+
+predicted_illu_S2= summary(emmeans::emmeans(b, ~group*illusion_strength, type = "response",  at = list(illusion_strength = seq(34, 95, by=0.1)))) %>% 
+  mutate(group = case_when(
+  group == 0 ~ "No-anomaly correct",
+  group == 1 ~ "Anomaly correct",
+  group == 2 ~ "Anomaly incorrect"),
+  group = factor(group, levels = c("No-anomaly correct", "Anomaly correct", "Anomaly incorrect")),
+  response = response*100,
+  conf.low = lower.HPD*100,
+  conf.high = upper.HPD*100,
+          Experiment = "Experiment 2") %>%
+  group_by(group) %>%
+   mutate(response = smooth.spline(illusion_strength, response, spar = 1)$y,
+     conf.high = smooth.spline(illusion_strength, conf.high, spar = 1)$y,
+          conf.low = smooth.spline(illusion_strength, conf.low, spar = 1)$y) %>% 
+  dplyr::select(Experiment, illusion_strength, group, response, conf.low, conf.high)
+
+predicted_illu_tot = predicted_illu_S1 %>% 
+  rbind(predicted_illu_S2)
+
+# get the two anomaly groups
+predicted_illu_tot_groups = predicted_illu_tot %>%
+  filter(group != "No-anomaly correct")
+
+# get the no anomaly correct group
+predicted_illu_tot_baseline = predicted_illu_tot %>%
+  filter(group == "No-anomaly correct")
+
+# create the figure
+illu_strength_S1_S2 = ggplot() +
+   geom_ribbon(predicted_illu_tot_groups, mapping=aes(x=illusion_strength, ymin=conf.low, ymax=conf.high, group=group, fill = group), alpha=0.1) +
+  geom_ribbon(predicted_illu_tot_baseline, mapping=aes(x=illusion_strength, ymin=conf.low, ymax=conf.high, group=group, fill = group), alpha=0.1, color="grey95") +
+geom_line(predicted_illu_tot_groups, mapping = aes(x=illusion_strength, y=response, color=group)) +
+  xlab("Illusion strength (%)") +
+  ylab("Confidence (%)") + theme_classic() +
+  theme(aspect.ratio = 1, text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10), axis.title.y = element_text(size = 10), legend.title = element_text(size=10)) +
+labs(color="Group") +
+  geom_line(predicted_illu_tot_baseline, mapping = aes(x=illusion_strength, y=response, color=group),  linetype = "dashed") + 
+  facet_wrap(vars(Experiment)) +
+  scale_fill_manual(values=c("#005AB5", "#DC3220", "black"),
+                    guide = "none") +
+  scale_color_manual(values=c("#005AB5", "#DC3220", "black"),
+                   guide = guide_legend(override.aes =
+                  list(linetype = c("solid", "solid", "dashed"),
+                   shape = c(16,16, NA),
+                   size=c(1, 1, 0.5),
+                   lwd = c(1, 1, 0.5)))) +
+  theme(aspect.ratio = 1)
+
+# save it
+ggsave(filename = "Output/Fig_illusion_strength_S1_S2.png", plot = illu_strength_S1_S2, device = "png", width = 6, height = 6, units = "in", dpi = 600)
+```
+
+
+### Accuracy and Direction of Change in Study 2 and Study 3 (impostor strength manipulation)
+
+```{r fig accu and dir of change in S2 and S3}
+data <- data %>% mutate(Impostor = factor(if_else(impostor == "strong", "Strong", "Weak"),
+                        levels=c("Strong", "Weak")))
+
+# accu S2 S3
+data_2_3_perf <- data %>% filter(study == 2 | study == 3) %>% group_by(subject, response_stage, conflict, Impostor) %>% 
+  summarise(accu = mean(accuracy, na.rm=TRUE)*100) %>% 
+  mutate(anomaly_presence = factor(if_else(conflict == "C", "Anomaly", "No-anomaly"), levels = c("Anomaly", "No-anomaly")),
+         response_stage = factor(if_else(response_stage == "b", "Final", "Initial"), levels=c("Initial", "Final")))
+
+## dir change S2 S3
+data_2_3_dir <- data %>%  filter(response_stage == "a" & (study == 2 | study == 3)) %>% dplyr::select(subject, conflict, direction) %>% 
+  group_by(subject, conflict, direction) %>%
+  mutate(count_per_dir = n()) %>% ungroup() %>% distinct() %>% group_by(conflict) %>% 
+  complete(subject, direction, fill = list(count_per_dir = 0)) %>% 
+  ungroup() %>%
+  group_by(subject, conflict) %>%
+  mutate(proportion = 100 * count_per_dir / sum(count_per_dir))  %>% 
+  ungroup() %>% 
+  mutate(anomaly_presence = factor(if_else(conflict == "C", "Anomaly", "No-anomaly"), levels = c("Anomaly", "No-anomaly")),
+         Impostor = factor(if_else(str_detect(subject, "^2"), "Strong", "Weak") ,
+                        levels=c("Strong", "Weak")))
+                                  
+# accu plot
+# set the offset position of the geoms
+pos <- position_dodge(0.9)
+
+plot_accu_s2_s3 <- ggplot(data_2_3_perf, aes(x=response_stage, y=accu, fill=Impostor)) +
+ geom_boxplot(fatten = 1.75, position = pos, outlier.shape = NA, alpha=0.5, aes(color = Impostor)) +
+  stat_summary(fun.data = "mean_se", geom="errorbar", position=pos, show.legend = FALSE, width = 0.25) +
+  stat_summary(fun = "mean", geom="point", position = pos, show.legend = FALSE) +
+  labs(y = "Accuracy (%)", x = "Response stage") +
+   theme_classic() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10)) +
+  scale_fill_manual(values=c("#005AB5", "#DC3220")) +
+  scale_color_manual(values=c("#005AB5", "#DC3220")) +
+  scale_y_continuous(limits=c(-2,105), expand = c(0, 0)) +
+  facet_grid(. ~ anomaly_presence)
+
+# dir plot
+plot_dir_s2_s3 <- ggplot(data_2_3_dir, aes(x=direction, y=proportion, fill=Impostor)) +
+  geom_boxplot(fatten = 1.75, position = pos, outlier.shape = NA, show.legend=FALSE, alpha = 0.5, aes(color = Impostor)) +
+     stat_summary(fun.data = "mean_se", 
+               geom = "errorbar", 
+               position = pos, show.legend=FALSE, width=0.25) +
+    stat_summary(fun = "mean", geom="point", position = pos, show.legend = FALSE) +
+  labs(y = "Proportion (%)", x = "Direction of change") +
+   theme_classic() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10), legend.position="none") + scale_fill_manual(values=c("#005AB5", "#DC3220")) +
+  scale_color_manual(values=c("#005AB5", "#DC3220")) +
+  scale_y_continuous(limits=c(-2,105), expand = c(0, 0)) +
+  facet_grid(. ~ anomaly_presence)
+plot_dir_s2_s3
+
+plot_accu_dir_S2_S3 <- ggarrange(plot_accu_s2_s3, plot_dir_s2_s3, ncol=1, nrow=2, labels = c("a", "b"), hjust = c(0, 0))
+
+ggsave(filename = "Output/Fig5_accu_dir_S2_S3.png", plot = plot_accu_dir_S2_S3, device = "png", width = 6, height = 6, units = "in", dpi = 600)
+```
+
+### Initial confidence ratings as a function of accuracy in Study 2 and Study 3
+
+```{r fig conf S2 S3}
+# conf S2 S3
+data_2_3_conf <- data %>% filter(response_stage == "a" & (study == 2 | study == 3)) %>% group_by(subject, accuracy, conflict, Impostor) %>% 
+  summarise(conf = mean(conf, na.rm=TRUE)) %>% 
+  mutate(anomaly_presence = factor(if_else(conflict == "C", "Anomaly", "No-anomaly"), levels = c("Anomaly", "No-anomaly")),
+         accuracy = factor(if_else(accuracy == 1, "Correct", "Incorrect"), levels=c("Correct", "Incorrect")))
+
+
+# accu plot
+# set the offset position of the geoms
+pos <- position_dodge(0.9)
+
+plot_conf_s2_s3 <- ggplot(data_2_3_conf, aes(x=accuracy, y=conf, fill=Impostor)) +
+ geom_boxplot(fatten = 1.75, position = pos, outlier.shape = NA, alpha = 0.5, aes(color = Impostor)) +
+  stat_summary(fun.data = "mean_se", geom="errorbar", position=pos, show.legend = FALSE, width = 0.25) +
+  stat_summary(fun = "mean", geom="point", position = pos, show.legend = FALSE) +
+  labs(y = "Initial confidence (%)", x = "Initial response") +
+   theme_classic() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10)) +
+  scale_fill_manual(values=c("#005AB5", "#DC3220")) +
+  scale_color_manual(values=c("#005AB5", "#DC3220")) +
+  scale_y_continuous(limits=c(-2,105), expand = c(0, 0)) +
+  facet_grid(. ~ anomaly_presence)
+
+ggsave(filename = "Output/Fig6_conf_accu_S2_S3.png", plot = plot_conf_s2_s3, device = "png", width = 6, height = 6, units = "in", dpi = 600)
+
+```
+
+### Distribution of individual non-correction rates and initial errors sensitivity measures (supplementary)
+
+```{r distrib individual non corr rates and initial error sensitivity measures}
+# CD EFFECTS
+# we compute CD for initial responses as a function of accuracy and impostor
+# strength (baseline = NC correct)
+data_CD <- data %>% filter(response_stage == "a") %>% mutate(group =
+          case_when(conflict == "NC" & accuracy == 0 ~ "NC_incorr",
+                    conflict == "NC" & accuracy == 1 ~ "NC_corr",
+                    conflict == "C" & accuracy == 0 ~ "C_incorr",
+                    conflict == "C" & accuracy == 1 ~ "C_corr")) %>% 
+  group_by(subject, group) %>% summarise(mean_conf = mean(conf)) %>% 
+  pivot_wider(names_from = group, values_from = mean_conf) %>% 
+  mutate(CD_corr = NC_corr - C_corr,
+         CD_incorr = NC_corr - C_incorr,
+         Experiment = case_when(
+           str_detect(subject, "^1") ~ "Experiment 1",
+          str_detect(subject, "^2") ~ "Experiment 2",
+            str_detect(subject, "^3") ~ "Experiment 3")) %>% 
+  dplyr::select(subject, Experiment, CD_corr, CD_incorr) %>% 
+  pivot_longer(c(CD_corr, CD_incorr), names_to = "accuracy", values_to = "CD") %>% 
+    mutate(accuracy = as.factor(if_else(accuracy == "CD_corr", 1, 0))) %>% 
+  filter(!is.na(CD)) %>% filter(accuracy == 0)
+
+distrib_CD <- ggplot(data_CD, aes(x = CD, y = Experiment, fill = Experiment)) +
+  geom_density_ridges(quantile_lines = TRUE, alpha = 0.75,
+                      quantiles = 2) + theme_classic() +
+  labs(y = "", x = "Confidence difference (%)")+
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10), legend.position="none")
+
+# NON-CORR RATES
+
+non_corr_rate_S1 = non_corr_rate_S1 %>% mutate(study = 1)
+non_corr_rate_S2 = non_corr_rate_S2 %>% mutate(study = 2)
+non_corr_rate_S3 = non_corr_rate_S3 %>% mutate(study = 3)
+
+data_corr_rate <- non_corr_rate_S1 %>% rbind(non_corr_rate_S2) %>% 
+  rbind(non_corr_rate_S3) %>% 
+  mutate(Experiment = factor(case_when(
+    study == 1 ~ "Experiment 1",
+    study == 2 ~ "Experiment 2",
+    study == 3 ~ "Experiment 3"
+  )))
+
+distrib_non_corr <- ggplot(data_corr_rate, aes(x = non_corr_rate, y = Experiment, fill = Experiment)) +
+  geom_density_ridges(quantile_lines=TRUE,
+                      quantiles=2, alpha=0.75) +
+  theme_classic() +
+  labs(y = "", x = "Non-correction rate (%)")+
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10), legend.position="none")
+
+plot_distrib <- ggarrange(distrib_non_corr, distrib_CD, ncol=1, nrow=2, labels = c("a", "b"), hjust = c(0, 0))
+
+ggsave(filename = "Output/Supp_distrib_plot.png", plot = plot_distrib, device = "png", width = 6, height = 6, units = "in", dpi = 600)
+
+```
+
+### Reaction times (supplementary)
+
+```{r reaction times overview}
+# filter study 1 and 2
+temp = data %>% filter(study == 1 | study == 2) %>% 
+  mutate(Experiment = factor(if_else(study == 1, "Experiment 1", "Experiment 2"))) %>% 
+  group_by(subject, response_stage, conflict, accuracy) %>%
+  summarise(mean_rt = mean(RT, na.rm=TRUE),
+            Experiment = unique(Experiment)) %>%
+  mutate(conflict = factor(if_else(conflict == "NC", "No-anomaly", "Anomaly"), levels = c("No-anomaly", "Anomaly")),
+         response_stage = factor(if_else(response_stage == "b", "Final response", "Initial response"), levels=c("Initial response", "Final response")),
+         Accuracy = factor(if_else(accuracy == 1, "Correct", "Incorrect"), levels=c("Correct", "Incorrect")))
+
+# set the offset position of the geoms
+pos <- position_dodge(0.9)
+
+# plot it
+plot_rt <- ggplot(temp, aes(x = Accuracy, y = mean_rt, fill = Experiment)) +
+  geom_boxplot(fatten = 1.75, outlier.shape = NA, alpha = 0.3,position = pos) +
+  stat_summary(fun.data = "mean_se", geom="errorbar", width=0.25, position = pos) +
+  stat_summary(fun = "mean", geom="point", position = pos) +
+  labs(y = "Reaction time (s)", x = "Accuracy") +
+  theme_classic() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10)) +
+  scale_fill_manual(values=c("#005AB5", "#DC3220")) +
+  scale_color_manual(values=c("#005AB5", "#DC3220")) +
+  facet_grid(rows = vars(response_stage), cols = vars(conflict)) +
+  scale_y_continuous(
+  limits = c(0, 9), 
+  expand = c(0, 0), 
+  breaks = seq(0, 8, 2)  # Adds ticks at every integer from 0 to 8
+)
+
+
+# save it
+ggsave(filename = "Output/Supp_RT_plot_S1_S2.png", plot = plot_rt, device = "png", width = 6, height = 6, units = "in", dpi = 600)
+```
+
+

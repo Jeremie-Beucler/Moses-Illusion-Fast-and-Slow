@@ -1,0 +1,680 @@
+---
+title: "Semantic illusions, fast and slow - Study 4"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
+```
+
+Note that the experiment referred to as study 4 in the code is actually referred to as Experiment 3 in the paper, because of the additional comparison two-response experiment that was conducted between experiment 2 and experiment 3. 
+
+```{r libraries, message=FALSE, warning=FALSE}
+#load the required libraries
+library(performance)
+library(tidyverse)
+library(ez)
+library(multcomp)
+library(pastecs)
+library(lme4)
+library(ggeffects)
+library(afex)
+library(emmeans)
+library(viridis)
+library(psych)
+library(car)
+library(WRS2)
+library(glmmTMB)
+library(jtools)
+library(ggpubr)
+library(lmerTest)
+library(cowplot)
+library(pbkrtest)
+library(ggridges)
+library(broom.mixed)
+library(betareg)
+library(lmtest)
+library(sandwich)
+library(buildmer)
+library(parallelly)
+library(parameters)
+library(effectsize)
+```
+
+```{r functions}
+# load functions
+
+# SE - compute standard errors
+std_mean <- function(x) sd(x, na.rm = TRUE)/sqrt(length(x[!is.na(x)]))
+
+# mean SD - return mean of a variable with sd in brackets
+mean_sd_function <- function(var, nb_decimals=0) {
+  mean_var =  round(mean(var, na.rm = TRUE), nb_decimals)
+  sd_var = round(sd(var, na.rm = TRUE), nb_decimals)
+  mean_sd = paste(mean_var, " (", sd_var, ")", sep="")
+  return(mean_sd)
+}
+
+# function to obtain the percentage of a given response for a given variable
+percent_function <- function(response, var) {
+  percent = sum(var == response) / length(var) * 100
+  return(percent)
+}
+
+# effect size for Wilcoxon test
+rFromWilcox<-function(wilcoxModel, N){
+z<- qnorm(wilcoxModel$p.value/2)
+r<- z/ sqrt(N)
+cat(wilcoxModel$data.name, "Effect Size, r = ", r)
+}
+
+# save load function
+save_load <- function(object, mode) {
+  data_folder <- "./Saved_models/"  # Specify the data folder path relative to your working directory
+  
+  if (mode == "save") {
+    # Save the object as an .rds file with the object name in the specified folder
+    file_name <- paste0(data_folder, deparse(substitute(object)), ".rds")
+    saveRDS(object, file_name)
+    cat("Object saved as", file_name, "\n")
+  } else if (mode == "load") {
+    # Load the object from the .rds file with the object name in the specified folder
+    file_name <- paste0(data_folder, deparse(substitute(object)), ".rds")
+    if (file.exists(file_name)) {
+      object <- readRDS(file_name)
+      cat("Object loaded from", file_name, "\n")
+      return(object)
+    } else {
+      cat("Error: File", file_name, "does not exist.\n")
+    }
+  } else {
+    cat("Error: Mode must be 'save' or 'load'.\n")
+  }
+}
+```
+
+```{r load df}
+# load the data from the 3 studies and the pre-test
+data <- read.csv("./tidy_data_S4.csv")
+
+# we change some variables types to factor
+data <- data %>% 
+  mutate_at(vars(subject, gender, education, item_number, response_block, conflict, resp_cat), as.factor)
+
+# get number of cores for parallel computations
+ncores = availableCores()
+```
+
+## Trial exclusion
+
+```{r missed load deadlines}
+# compute percent of missed deadlines or loads by subject + raw nb of trials (/2000)
+temp <- data %>% filter(response_block == "Fast") %>%
+  # exclude missed dealines or missed loads
+  summarise(percent_missed_tot = sum(slow == 1 |load_acc == 0)/length(slow)*100,
+            raw_nb_tot = sum(slow == 1 |load_acc == 0),
+            percent_missed_load = sum(load_acc == 0)/length(slow)*100,
+            percent_missed_deadline = sum(slow == 1)/length(slow)*100) %>% 
+ mutate(across(where(is.numeric), round, 1))
+
+knitr::kable(temp, col.names = c("% missed (total)", "Raw number / 2000", "% missed load", "% missed deadline"), digits = 1, align = "l", caption = "Missed loads or deadline in Study 4")
+
+```
+
+
+```{r missed load deadline per subject}
+# compute percent of missed deadlines or loads by subject + raw nb of trials (/2000)
+# nb of completed trials by subject
+correct_trials <- data %>% filter(response_block == "Fast") %>% group_by(subject) %>% 
+  summarise(nb_trial = sum(slow == 0 & load_acc == 1))
+
+nb_correct_by_subject <- mean_sd_function(correct_trials$nb_trial, 1)
+```
+
+
+```{r missed load deadline per conflict}
+# compute percent of missed deadlines or loads by subject + raw nb of trials (/2000)
+temp <- data %>% filter(response_block == "Fast") %>%
+  group_by(conflict) %>% 
+  # exclude missed dealines or missed loads
+  summarise(percent_missed_tot = sum(slow == 1 |load_acc == 0)/length(slow)*100,
+            raw_nb_tot = sum(slow == 1 |load_acc == 0),
+            percent_missed_load = sum(load_acc == 0)/length(slow)*100,
+            percent_missed_deadline = sum(slow == 1)/length(slow)*100) %>% 
+ mutate(across(where(is.numeric), round, 1))
+
+knitr::kable(temp, col.names = c("Conflict", "% missed (total)", "Raw number / 2000", "% missed load", "% missed deadline"), digits = 1, align = "l", caption = "Missed loads or deadline in Study 4 as a function of conflict")
+```
+
+```{r missed load deadline per impostor strength}
+# compute percent of missed deadlines or loads by subject + raw nb of trials (/2000)
+temp <- data %>% filter(response_block == "Fast" & conflict == "C") %>%
+  group_by(impostor) %>% 
+  # exclude missed dealines or missed loads
+  summarise(percent_missed_tot = sum(slow == 1 |load_acc == 0)/length(slow)*100,
+            raw_nb_tot = sum(slow == 1 |load_acc == 0),
+            percent_missed_load = sum(load_acc == 0)/length(slow)*100,
+            percent_missed_deadline = sum(slow == 1)/length(slow)*100) %>% 
+ mutate(across(where(is.numeric), round, 1))
+
+knitr::kable(temp, col.names = c("Impostor", "% missed (total)", "Raw number / 2000", "% missed load", "% missed deadline"), digits = 1, align = "l", caption = "Missed loads or deadline in Study 4 as a function of impostor strength")
+```
+
+
+### Trial exclusion code(s)
+
+Here comment / uncomment the lines given the analyses you want to perform.
+
+```{r exlusion failed loads or deadlines}
+# we remove the trials to exclude in the fast block (slow response and failed load)
+# as in the main results of the paper
+data = data %>% filter(to_exclude == 0) %>% 
+  # we create a new confidence variable bounded between 0 and 1
+  mutate(betaconf = ((conf/100)*(1-0.01) + 0.01/2))
+
+# here you can comment the lines above to:
+# 1) exclude "Don't know" results
+# if you want to check the robustness of the confidence results
+
+# data = data %>% filter(to_exclude == 0) %>% 
+#   # we create a new confidence variable bounded between 0 and 1
+#   mutate(betaconf = ((conf/100)*(1-0.01) + 0.01/2)) %>% 
+#   filter(resp_cat != 4)
+
+# 2) recode excluded trials as 0 (missed deadline) and keep the responses for
+# missed loads (as responses were recorded for those trials) to see whether
+# response exclusion drive the results
+
+# data = data %>%
+#   # we create a new confidence variable bounded between 0 and 1
+#   mutate(betaconf = ((conf/100)*(1-0.01) + 0.01/2),
+#          accuracy = case_when(slow == 1 ~ 0,
+#                               TRUE ~ accuracy))
+```
+
+
+## Reaction time as a function of response block for anomaly correct responses
+
+Response block = dummy coded
+
+```{r RT desc stats}
+temp = data %>% group_by(subject, response_block) %>% 
+  summarise(mean_rt = mean(RT)) %>% 
+  group_by(response_block) %>% 
+  summarise(mean_rt = mean(mean_rt))
+
+knitr::kable(temp, digits=1)
+```
+
+
+```{r RT model}
+temp = data %>% 
+  mutate(response_block = factor(response_block, levels = c("Fast", "Slow")),
+         log_rt = log(RT)) %>% 
+  filter(conflict == "C" & accuracy == 1)
+
+
+# simple linear model
+model_S4_rt = lm(log(RT) ~ response_block, data = temp)
+
+# max random structure
+formula = log_rt ~ response_block + (response_block|subject) + (response_block|item_number)
+
+# finding the best random structure
+model = buildmer(formula, data = temp, buildmerControl=buildmerControl(include = "response_block", args=list(control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))))
+
+# looking at the formula
+final_formula = formula(model@model); final_formula
+
+# we build the model with the final formula
+model_S4_rt_1 = lmer(formula = log(RT) ~ 1 + response_block + (1 | subject) + (1 | item_number), data = temp, control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))
+save_load(model_S4_rt_1, "save")
+
+# we load the model
+model_S4_rt_1 = save_load(model_S4_rt_1, "load")
+
+# we check that mixed model better than linear model
+AIC(model_S4_rt, model_S4_rt_1)
+
+# we look at the unadjusted ICC because RE are not of interest here
+icc(model_S4_rt_1)$ICC_unadjusted
+
+
+summ(model_S4_rt_1, t.df="k-r", exp=TRUE)
+model_parameters(model_S4_rt_1, effects = "random")
+
+emm_options(lmer.df = "Kenward-Roger")
+
+emm_S4_rt_1 = emmeans(model_S4_rt_1, ~ response_block, type = "response")
+save_load(emm_S4_rt_1, "save")
+
+# we load it
+emm_S4_rt_1 = save_load(emm_S4_rt_1, "load"); emm_S4_rt_1
+
+# eff size
+eff_size(emm_S4_rt_1, df.residual(model_S4_rt_1), sigma = sigma(model_S4_rt_1))
+```
+
+## Error type analysis
+
+Here we look at the distribution of errors on the whole sample.
+
+```{r error type analysis}
+temp = data  %>% 
+  filter(accuracy == 0) %>% 
+  group_by(subject, conflict, response_block) %>% 
+  summarise(percent_heur = percent_function(1, resp_cat),
+            percent_filler = percent_function(2, resp_cat),
+            percent_cannot_ans = percent_function(3, resp_cat),
+            percent_dk = percent_function(4, resp_cat)) %>% 
+  group_by(conflict, response_block) %>% 
+  summarise(
+    HEUR = mean(percent_heur),
+    FILLER = mean(percent_filler),
+    CANNOT = mean(percent_cannot_ans),
+    DK = mean(percent_dk)
+  )
+  
+knitr::kable(temp, digits = 1, align = "l")
+```
+
+## Accuracy as a function of impostor, response block and anomaly
+
+```{r summary stats accu}
+temp = data %>% 
+  group_by(subject, impostor, conflict, response_block) %>% 
+  summarise(mean_accu = mean(accuracy)*100) %>% 
+  group_by(conflict, response_block, impostor) %>% 
+  summarise(mean_accu = mean_sd_function(mean_accu, 1))
+
+knitr::kable(temp, digits = 1)
+
+# whole sample
+temp = data %>%
+  group_by(subject, conflict, response_block) %>% 
+  summarise(mean_accu = mean(accuracy)*100) %>% 
+  group_by(conflict, response_block) %>% 
+  summarise(mean_accu = mean_sd_function(mean_accu, 1))
+
+knitr::kable(temp, digits = 1)
+```
+
+Impostor,response block and anomaly = sum coding
+
+```{r accu impostor response block}
+temp = data %>% 
+  mutate(impostor = factor(impostor, levels = c("strong", "weak")),
+         response_block = factor(response_block),
+         conflict = factor(conflict, levels = c("NC", "C")))
+
+# we set sum coding
+contrasts(temp$impostor) = contr.sum(levels(temp$impostor))
+contrasts(temp$response_block) = contr.sum(levels(temp$response_block))
+contrasts(temp$conflict) = contr.sum(levels(temp$conflict))
+
+# simple glm model
+model_S4_accu = glm(accuracy ~ impostor*response_block*conflict, family = "binomial", data = temp)
+
+summary(model_S4_accu)
+
+# max random structure, we do not include interactions because models would not converge
+formula = accuracy ~ impostor*response_block*conflict + (response_block+conflict|subject) + (impostor+response_block+conflict|item_number)
+
+# we find the best random structure
+model = buildmer(formula, data = temp, family = "binomial", buildmerControl=buildmerControl(include = "impostor*response_block*conflict", args=list(control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))))
+
+final_formula = formula(model@model); final_formula
+
+# we run the model with the final formula
+model_S4_accu_1 = mixed(formula = final_formula, family = "binomial", data = temp, control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)), expand_re = TRUE, method = "PB", progress=TRUE, args_test = list(nsim = 1000, seed = 123, cl = ncores))
+save_load(model_S4_accu_1, "save")
+
+# we load it
+model_S4_accu_1 = save_load(model_S4_accu_1, "load")
+summary(model_S4_accu_1)
+
+# we check that better fit than simple glm model
+AIC(model_S4_accu, model_S4_accu_1$full_model)
+
+nice(model_S4_accu_1)
+model_parameters(model_S4_accu_1$full_model, effects = "random")
+
+# post hoc tests
+emmeans(model_S4_accu_1$full_model, pairwise~ response_block|conflict, type = "response", adjust = "holm")
+emmeans(model_S4_accu_1$full_model, pairwise~ impostor|conflict, type = "response", adjust = "holm")
+
+model_parameters(model_S4_accu_1$full_model, effects="fixed") %>% 
+  mutate(d = logoddsratio_to_d(Coefficient)) %>% 
+  dplyr::select(Parameter, d)
+```
+
+```{r power analysis n200}
+model_accu_C_S4_pwr= glmer(formula = accuracy ~ 1 + impostor * response_block * conflict  +  
+    (1 + conflict | subject) + (1 + conflict | item_number), family ="binomial", data = temp, control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5)))
+
+
+temp_S4_pwr = temp
+save_load(temp_S4_pwr, "save")
+save_load(model_accu_C_S4_pwr, "save")
+```
+
+## Ratio accuracy intuitive / deliberate
+
+```{r ratio intuitive / deliberate}
+temp = data %>% filter(conflict == "C") %>% 
+  group_by(response_block, impostor, item_number) %>% 
+  summarise(mean_accu = mean(accuracy)*100) %>% 
+  pivot_wider(names_from = response_block, values_from = mean_accu) %>% 
+  mutate(ratio = (Fast/Slow)*100)
+
+temp %>% group_by(impostor) %>% 
+  summarise(ratio = mean_sd_function(ratio, 1))
+```
+
+## Figure accuracy
+
+```{r figure accuracy conflict}
+raw_data = data %>% group_by(subject, response_block, impostor, conflict) %>% 
+  summarise(yvar = mean(accuracy)*100) %>% 
+  mutate(impostor = if_else(impostor == "strong", "Strong", "Weak"),
+         anomaly = if_else(conflict == "C", "Anomaly", "No-anomaly"),
+         response_block = factor(if_else(response_block == "Fast", "Intuitive", "Deliberative"), levels=c("Intuitive", "Deliberative")))
+
+# accu plot
+# set the offset position of the geoms
+pos <- position_dodge(0.9)
+
+plot_accu_S4 <- ggplot(raw_data, aes(x=response_block, y=yvar, fill=impostor)) +
+ geom_boxplot(fatten = 1.75, position = pos, outlier.shape = NA, alpha=0.5, aes(color = impostor)) +
+  stat_summary(fun.data = "mean_se", 
+               geom = "errorbar", 
+               position = pos, show.legend=FALSE, width=0.25) +
+    stat_summary(fun = "mean", geom="point", position = pos, show.legend = FALSE) +
+  labs(y = "Accuracy (%)", x = "Response block", fill = "Impostor", color = "Impostor") +
+   theme_classic() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10)) +
+  scale_fill_manual(values=c("#005AB5", "#DC3220")) +
+  scale_color_manual(values=c("#005AB5", "#DC3220")) +
+  scale_y_continuous(limits=c(-2,105), expand = c(0, 0)) +
+  facet_wrap(vars(anomaly))
+
+plot_accu_S4
+
+ggsave(filename = "Output/Fig_accu_S4.png", plot = plot_accu_S4, device = "png", width = 8, height = 6, units = "in", dpi = 600)
+```
+
+## Confidence as a function of impostor, conflict and accuracy in the Fast block
+
+Impostor and group = dummy coding
+
+```{r intuitive conf fast}
+# we remove 9 NA values for conf
+data_c = data %>% filter(!is.na(conf))
+
+temp = data_c %>% filter(response_block == "Fast") %>% 
+  group_by(subject, conflict, impostor, accuracy) %>% 
+  summarise(conf = mean(conf, na.rm=TRUE)) %>% 
+  group_by(conflict, accuracy, impostor) %>% 
+  summarise(conf = mean(conf, na.rm=TRUE))
+
+knitr::kable(temp, digits=1, align="c")
+```
+
+
+```{r confidence impostor conflict accuracy fast}
+# we create a group variable and remove the NC incorrect
+temp = data_c %>% 
+  mutate(group = factor(case_when(conflict == "NC" & accuracy == 1 ~ 0,
+                                  conflict == "C" & accuracy == 1 ~ 1,
+                                  conflict == "C" & accuracy == 0 ~ 2,
+          TRUE ~ 999))) %>% 
+  filter(group != 999) %>% 
+  mutate(impostor = factor(impostor)) %>% 
+  filter(response_block == "Fast") %>% 
+  na.omit()
+
+# simple beta regression model
+model_S4_conf_fast = betareg(betaconf ~ impostor * group, data = temp)
+
+# max random structure
+formula = betaconf ~ impostor*group + (group|subject) + (impostor*group|item_number)
+
+# we find the best random structure
+model = buildglmmTMB(formula, data = temp, family = beta_family(), buildmerControl=buildmerControl(include = "impostor*group"))
+
+final_formula = formula(model@model); final_formula
+
+model_S4_conf_fast_1 = glmmTMB(formula = final_formula, ziformula= ~0, family = beta_family(), data=temp)
+diagnose(model_S4_conf_fast_1)
+save_load(model_S4_conf_fast_1, "save")
+
+model_S4_conf_fast_1 = save_load(model_S4_conf_fast_1, "load")
+
+# we check that better fit to the data than simple model
+AIC(model_S4_conf_fast, model_S4_conf_fast_1)
+
+# we put more iterations because of convergence failures
+model_conf_S4_boot = parameters::bootstrap_model(
+  model_S4_conf_fast_1,
+  iterations = 4000,
+  type = "parametric",
+  parallel = "multicore",
+  n_cpus = ncores,
+  cluster = NULL,
+  verbose =TRUE
+)
+save_load(model_conf_S4_boot, "save")
+
+model_conf_S4_boot = save_load(model_conf_S4_boot, "load")
+
+summary(model_S4_conf_fast_1)
+
+b = bootstrap_parameters(model_conf_S4_boot) %>% 
+  mutate(d = logoddsratio_to_d(Coefficient),
+         d_low = logoddsratio_to_d(CI_low),
+         d_high = logoddsratio_to_d(CI_high),
+         Coefficient = exp(Coefficient), CI_low = exp(CI_low), CI_high = exp(CI_high)); b
+model_parameters(model_S4_conf_fast_1, effects = "random")
+
+# estimated means
+emm = emmeans::emmeans(model_conf_S4_boot, ~ impostor|group, interaction = "consec", type = "response"); print(model_parameters(emm), digits=3)
+```
+
+```{r power analysis S4 confidence}
+temp_S4_conf = temp
+save_load(temp_S4_conf, "save")
+```
+
+## Figure confidence
+
+```{r figure confidence fast S4}
+# conf S2 S3
+data_4_conf <- data_c %>% filter(response_block == "Fast") %>%
+  group_by(subject, accuracy, conflict, impostor) %>% 
+  summarise(conf = mean(conf, na.rm=TRUE)) %>% 
+  mutate(anomaly_presence = factor(if_else(conflict == "C", "Anomaly", "No-anomaly"), levels = c("Anomaly", "No-anomaly")),
+         accuracy = factor(if_else(accuracy == 1, "Correct", "Incorrect"), levels=c("Correct", "Incorrect")),
+         Impostor = if_else(impostor == "strong", "Strong", "Weak"),
+         Impostor = factor(Impostor, levels=c("Strong", "Weak")))
+
+
+# set the offset position of the geoms
+pos <- position_dodge(0.9)
+
+plot_conf_s2_s3 <- ggplot(data_4_conf, aes(x=accuracy, y=conf, fill=Impostor)) +
+ geom_boxplot(fatten = 1.75, position = pos, outlier.shape = NA, alpha = 0.5, aes(color = Impostor)) +
+  stat_summary(fun.data = "mean_se", geom="errorbar", position=pos, show.legend = FALSE, width = 0.25) +
+  stat_summary(fun = "mean", geom="point", position = pos, show.legend = FALSE) +
+  labs(y = "Intuitive confidence (%)", x = "Intuitive response") +
+   theme_classic() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10)) +
+  scale_fill_manual(values=c("#005AB5", "#DC3220")) +
+  scale_color_manual(values=c("#005AB5", "#DC3220")) +
+  scale_y_continuous(limits=c(-2,105), expand = c(0, 0)) +
+  facet_grid(. ~ anomaly_presence)
+
+ggsave(filename = "Output/Fig_conf_S4.png", plot = plot_conf_s2_s3, device = "png", width = 6, height = 6, units = "in", dpi = 600)
+```
+
+## Illusion strength analysis
+
+```{r illu strength S4}
+# we compute the mean illusion strength for each item
+# initial no-conflict accuracy minus initial conflict accuracy
+illusion_strength <- data_c %>% filter(response_block == "Fast") %>%
+  mutate(item_number = if_else(impostor == "strong", as.character(as.numeric(item_number) + 20), as.character(item_number))) %>%  group_by(item_number, conflict) %>% 
+  summarise(mean_accu = mean(accuracy)*100) %>% 
+  pivot_wider(names_from = "conflict", values_from = "mean_accu") %>% 
+  mutate(illusion_strength = NC - C) %>% 
+  dplyr::select(item_number, illusion_strength)
+
+# scale it
+#compute mean and sd of illusion strength
+mean_illu = mean(illusion_strength$illusion_strength)
+sd_illu = sd(illusion_strength$illusion_strength)
+
+# we standardize the illusion strength
+illusion_strength <- illusion_strength %>%
+  mutate(illusion_strength = (illusion_strength - mean_illu) / sd_illu)
+
+# we join the tables; select the fast stage data
+# we create a variable named group: 0 for no-conflict correct (baseline),
+# 1 for conflict correct and 2 for conflict incorrect
+temp <- data_c %>% filter(response_block == "Fast")  %>%
+  mutate(item_number = if_else(impostor == "strong", as.character(as.numeric(item_number) + 20), as.character(item_number))) %>% 
+  left_join(illusion_strength) %>% mutate(accuracy = as.factor(accuracy)) %>% 
+  mutate(group = as.factor(case_when(conflict== "NC" & accuracy == 1 ~ 0,
+                       conflict == "C" & accuracy == 1 ~ 1,
+                       conflict == "C" & accuracy == 0 ~ 2,
+                       TRUE ~ 3))) %>% filter(group != 3)
+
+# simple beta regression model
+model_S4_illu_both = betareg(betaconf ~ group * illusion_strength, data = temp)
+
+# max random structure
+formula = betaconf ~ group * illusion_strength + (group*illusion_strength|subject)
+
+# we find the best random structure
+model = buildglmmTMB(formula, data = temp, family = beta_family(), buildmerControl=buildmerControl(include = "group * illusion_strength"))
+
+final_formula = formula(model@model); final_formula
+
+# we build the model with the final formula
+model_S4_illu_both_1 = glmmTMB(formula = final_formula, ziformula= ~0, family = beta_family(), data=temp)
+diagnose(model_S4_conf_fast_1)
+save_load(model_S4_illu_both_1, "save")
+
+model_S4_illu_both_1 = save_load(model_S4_illu_both_1, "load")
+
+# we compare it to simple beta regression
+AIC(model_S4_illu_both, model_S4_illu_both_1)
+
+#parametric bootstrap
+model_illu_S4_boot = bootstrap_model(
+  model_S4_illu_both_1,
+  iterations = 3700,
+  type = "parametric",
+  parallel = "multicore",
+  n_cpus = ncores,
+  cluster = NULL,
+  verbose =TRUE
+)
+save_load(model_illu_S4_boot, "save")
+
+model_illu_S4_boot = save_load(model_illu_S4_boot, "load")
+
+b = bootstrap_parameters(model_illu_S4_boot) %>% 
+  mutate(d = logoddsratio_to_d(Coefficient),
+         d_low = logoddsratio_to_d(CI_low),
+         d_high = logoddsratio_to_d(CI_high),
+         Coefficient = exp(Coefficient), CI_low = exp(CI_low), CI_high = exp(CI_high)); b
+model_parameters(model_S4_illu_both_1, effects = "random")
+```
+
+# Illusion strength figure (supplementary)
+
+```{r illusion strength figure S4}
+# get EMM
+b = bootstrap_parameters(model_illu_S4_boot)
+
+predicted_illu_S4 = summary(emmeans::emmeans(b, ~group*illusion_strength, type = "response",  at = list(illusion_strength = seq(13, 94, by=0.1)))) %>% 
+  mutate(group = case_when(
+  group == 0 ~ "No-anomaly correct",
+  group == 1 ~ "Anomaly correct",
+  group == 2 ~ "Anomaly incorrect"),
+  group = factor(group, levels = c("No-anomaly correct", "Anomaly correct", "Anomaly incorrect")),
+  response = response *100,
+  conf.low = lower.HPD*100,
+  conf.high = upper.HPD*100) %>%
+  group_by(group) %>%
+  mutate(upper_smoothed = smooth.spline(illusion_strength, conf.high, spar = 1)$y,
+         lower_smoothed = smooth.spline(illusion_strength, conf.low, spar = 1)$y)
+
+predicted_illu_S4_groups = predicted_illu_S4 %>% 
+  filter(group != "No-anomaly correct")
+
+predicted_illu_S4_baseline = predicted_illu_S4 %>% 
+  filter(group == "No-anomaly correct")
+
+
+# create the figure
+illu_strength_S4 = ggplot() +
+   geom_ribbon(predicted_illu_S4_groups, mapping=aes(x=illusion_strength, ymin=upper_smoothed, ymax=lower_smoothed, group=group, fill = group), alpha=0.1) +
+  geom_ribbon(predicted_illu_S4_baseline, mapping=aes(x=illusion_strength, ymin=upper_smoothed, ymax=lower_smoothed, group=group, fill = group), alpha=0.1, color="grey95") +
+geom_line(predicted_illu_S4_groups, mapping = aes(x=illusion_strength, y=response, color=group)) +
+  xlab("Illusion strength (%)") +
+  ylab("Confidence (%)") + theme_classic() +
+  theme(aspect.ratio = 1, text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10), axis.title.y = element_text(size = 10), legend.title = element_text(size=10)) +
+labs(color="Group") +
+  geom_line(predicted_illu_S4_baseline, mapping = aes(x=illusion_strength, y=response, color=group),  linetype = "dashed") + 
+  scale_fill_manual(values=c("#005AB5", "#DC3220", "black"),
+                    guide = "none") +
+  scale_color_manual(values=c("#005AB5", "#DC3220", "black"),
+                   guide = guide_legend(override.aes =
+                  list(linetype = c("solid", "solid", "dashed"),
+                   shape = c(16,16, NA),
+                   size=c(1, 1, 0.5),
+                   lwd = c(1, 1, 0.5)))) +
+  theme(aspect.ratio = 1)
+
+# save it
+ggsave(filename = "Output/Fig_illusion_strength_S4.png", plot = illu_strength_S4, device = "png", width = 6, height = 6, units = "in", dpi = 600)
+```
+
+## Reaction times (supplementary)
+
+```{r reaction times overview}
+# filter study 1 and 2
+temp = data  %>% 
+  group_by(subject, response_block, conflict, accuracy) %>%
+  summarise(mean_rt = mean(RT, na.rm=TRUE)) %>%
+  mutate(conflict = factor(if_else(conflict == "NC", "No-anomaly", "Anomaly"), levels = c("No-anomaly", "Anomaly")),
+         response_block = factor(if_else(response_block == "Fast", "Intuitive block", "Deliberative block"), levels=c("Intuitive block", "Deliberative block")),
+         Accuracy = factor(if_else(accuracy == 1, "Correct", "Incorrect"), levels=c("Correct", "Incorrect")))
+
+# set the offset position of the geoms
+pos <- position_dodge(0.9)
+
+# plot it
+plot_rt_S3 <- ggplot(temp, aes(x=Accuracy, y=mean_rt, fill = Accuracy)) +
+  geom_boxplot(fatten = 1.75, position = pos, outlier.shape = NA, alpha = 0.3) +
+  stat_summary(fun.data = "mean_se", geom="errorbar", position=pos, show.legend = FALSE, width = 0.25) +
+  stat_summary(fun = "mean", geom="point", position = pos, show.legend = FALSE) +
+  labs(y = "Reaction time (s)", x = "Accuracy") +
+  theme_classic() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"), strip.text.x = element_text(size = 10), axis.title.x = element_text(size = 10), legend.position = "none") +
+  scale_fill_manual(values=c("#005AB5", "#DC3220")) +
+  scale_color_manual(values=c("#005AB5", "#DC3220")) +
+  scale_y_continuous(
+  limits = c(0, 12), 
+  expand = c(0, 0), 
+  breaks = seq(0, 11, 2)  # Adds ticks at every integer from 0 to 8
+) +
+   facet_grid(cols = vars(conflict), rows = vars(response_block)); plot_rt_S3
+
+
+# save it
+ggsave(filename = "Output/Supp_RT_plot_S3.png", plot = plot_rt_S3, device = "png", width = 6, height = 6, units = "in", dpi = 600)
+```
+
